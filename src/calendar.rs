@@ -82,7 +82,7 @@ fn read_source(source: &CalendarSource, date: NaiveDate) -> Result<Vec<Meeting>>
 
 fn fetch_ics(url: &str) -> Result<String> {
     let body = ureq::get(url)
-        .header("User-Agent", "thermy-calendar/1.0")
+        .header("User-Agent", "receipter-calendar/1.0")
         .call()
         .with_context(|| format!("requesting calendar from `{url}`"))?
         .body_mut()

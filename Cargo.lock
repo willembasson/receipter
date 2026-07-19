@@ -1658,6 +1658,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03251193000f4bd3b042892be858ee50e8b3719f2b08e5833ac4353724632430"
 
 [[package]]
+name = "receipter"
+version = "0.1.0"
+dependencies = [
+ "ab_glyph",
+ "anyhow",
+ "chrono",
+ "chrono-tz",
+ "clap",
+ "env_logger",
+ "escpos",
+ "ical",
+ "image",
+ "imageproc",
+ "log",
+ "rrule",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "toml",
+ "ureq",
+]
+
+[[package]]
 name = "regex"
 version = "1.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1990,29 +2013,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
-]
-
-[[package]]
-name = "thermy"
-version = "0.1.0"
-dependencies = [
- "ab_glyph",
- "anyhow",
- "chrono",
- "chrono-tz",
- "clap",
- "env_logger",
- "escpos",
- "ical",
- "image",
- "imageproc",
- "log",
- "rrule",
- "rusqlite",
- "serde",
- "serde_json",
- "toml",
- "ureq",
 ]
 
 [[package]]

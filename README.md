@@ -1,4 +1,4 @@
-# thermy
+# receipter
 
 A small Rust CLI that prints a daily "morning receipt" to an 80mm ESC/POS
 network thermal printer. Each receipt has three parts:
@@ -23,7 +23,7 @@ a PNG file.
 cargo build --release
 ```
 
-The binary is written to `target/release/thermy`. A JetBrains Mono Nerd Font
+The binary is written to `target/release/receipter`. A JetBrains Mono Nerd Font
 is bundled under `fonts/` for the image renderer, so no system font install is
 required.
 
@@ -31,13 +31,13 @@ required.
 
 ```sh
 # Print today's receipt to the printer configured in settings.toml
-thermy
+receipter
 
 # Preview today's receipt in the terminal (no printer needed)
-thermy --stdout
+receipter --stdout
 
 # Preview as an image (full Unicode: arrows, degree signs, icons)
-thermy --output preview.png
+receipter --output preview.png
 ```
 
 ## Configuration
@@ -157,7 +157,7 @@ below).
   printer or writing a PNG file:
 
   ```sh
-  thermy --stdout --imageText
+  receipter --stdout --imageText
   ```
 - **`--raw`** — dumps the ESC/POS command bytes (e.g. pipe to `xxd`).
 
@@ -167,8 +167,8 @@ Use `-D/--date` with a `YYYYMMDD` value to print a specific day, or the
 `-t/--tomorrow` shorthand:
 
 ```sh
-thermy --date 20260716 --stdout
-thermy --tomorrow --stdout
+receipter --date 20260716 --stdout
+receipter --tomorrow --stdout
 ```
 
 - **Today** shows current conditions as wttr.in ASCII art.
@@ -195,7 +195,7 @@ with their next departures:
 - **Pin specific stops** with `station_codes` (CRS) and/or `bus_stop_codes`
   (ATCO). When set, these replace the nearest-stop search for that mode — and if
   both are pinned, no geocoding or proximity lookup happens at all. Run
-  `thermy --list-stops` to print the nearby stops and their codes:
+  `receipter --list-stops` to print the nearby stops and their codes:
 
   ```
   Nearest train stations  (station_codes = CRS)
@@ -281,7 +281,7 @@ localhost and point a settings file at it:
 
 ```sh
 python3 -m http.server 8767 --directory /tmp &
-thermy --config /tmp/settings.toml --date 20261228 --stdout
+receipter --config /tmp/settings.toml --date 20261228 --stdout
 ```
 
 ## License
