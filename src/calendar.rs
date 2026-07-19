@@ -13,6 +13,8 @@ use rrule::RRuleSet;
 use serde::Deserialize;
 use std::io::BufReader;
 
+use crate::cache::{self, Cache};
+
 /// One calendar to read from, as configured in the settings file.
 #[derive(Debug, Clone, Deserialize)]
 pub struct CalendarSource {
@@ -56,13 +58,19 @@ impl Meeting {
 }
 
 /// Read every configured calendar and return the meetings on `date`, sorted by
-/// start time. A failure reading one calendar is logged and skipped so the
-/// others (and the weather) still print.
-pub fn meetings_on(sources: &[CalendarSource], date: NaiveDate) -> Vec<Meeting> {
+/// start time. Each feed is fetched through `cache` (keyed per calendar and
+/// date), so repeat runs, past dates, and offline/rate-limited fetches are
+/// served from the cache. A failure reading one calendar is logged and skipped
+/// so the others (and the weather) still print.
+pub fn meetings_on(
+    sources: &[CalendarSource],
+    date: NaiveDate,
+    cache: Option<&Cache>,
+) -> Vec<Meeting> {
     let mut meetings = Vec::new();
 
     for source in sources {
-        match read_source(source, date) {
+        match read_source(source, date, cache) {
             Ok(mut found) => meetings.append(&mut found),
             Err(e) => eprintln!(
                 "warning: could not load calendar `{}`: {e:#}",
@@ -75,9 +83,23 @@ pub fn meetings_on(sources: &[CalendarSource], date: NaiveDate) -> Vec<Meeting> 
     meetings
 }
 
-fn read_source(source: &CalendarSource, date: NaiveDate) -> Result<Vec<Meeting>> {
-    let ics = fetch_ics(&source.ics_url)?;
+fn read_source(source: &CalendarSource, date: NaiveDate, cache: Option<&Cache>) -> Result<Vec<Meeting>> {
+    // Key by a hash of the secret iCal URL (so the token is never written to the
+    // cache DB) plus the date, mirroring the transport per-date history model.
+    let key = format!("{}|{}", url_hash(&source.ics_url), date.format("%Y%m%d"));
+    let ics = cache::cached(cache, "calendar", &key, Some(date), false, || {
+        fetch_ics(&source.ics_url)
+    })?;
     parse_meetings(&ics, date, source.name.as_deref())
+}
+
+/// Stable, non-reversible identifier for a secret iCal URL, used as a cache key
+/// so the token itself is never persisted.
+fn url_hash(url: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    url.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 fn fetch_ics(url: &str) -> Result<String> {

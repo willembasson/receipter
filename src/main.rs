@@ -244,7 +244,7 @@ fn main() -> Result<()> {
         append_meetings(
             &report,
             heading,
-            &calendar::meetings_on(&settings.calendars, target_date),
+            &calendar::meetings_on(&settings.calendars, target_date, cache),
         )
     };
 
