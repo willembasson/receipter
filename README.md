@@ -283,3 +283,13 @@ localhost and point a settings file at it:
 python3 -m http.server 8767 --directory /tmp &
 thermy --config /tmp/settings.toml --date 20261228 --stdout
 ```
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
+
+The bundled font `fonts/JetBrainsMonoNerdFontMono-Regular.ttf` is
+[JetBrains Mono](https://github.com/JetBrains/JetBrainsMono) (patched by
+[Nerd Fonts](https://github.com/ryanoasis/nerd-fonts)), which is licensed under
+the SIL Open Font License 1.1. See [fonts/OFL.txt](fonts/OFL.txt) for the full
+text. "JetBrains Mono" is a trademark of JetBrains s.r.o.
