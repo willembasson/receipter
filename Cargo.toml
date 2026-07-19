@@ -1,0 +1,23 @@
+[package]
+name = "thermy"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ab_glyph = "0.2.32"
+anyhow = "1.0.103"
+chrono = "0.4.45"
+chrono-tz = "0.10.4"
+clap = { version = "4.6.1", features = ["derive"] }
+env_logger = "0.11.11"
+escpos = { version = "0.19.0", features = ["full"] }
+ical = { version = "0.11.0", features = ["ical"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+imageproc = { version = "0.27.0", default-features = false, features = ["text"] }
+log = "0.4.33"
+rrule = "0.14.0"
+rusqlite = { version = "0.40.1", features = ["bundled"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+toml = "1.1.3"
+ureq = "3.3.0"

@@ -1,0 +1,72 @@
+# Example configuration. Copy this to `settings.toml` and fill in your own
+# values:
+#
+#     cp settings.example.toml settings.toml
+#
+# `settings.toml` is git-ignored because it holds secrets (TransportAPI keys and
+# private calendar URLs). Keep those out of version control.
+
+# Network endpoint of the ESC/POS printer, as "host:port".
+endpoint = "192.168.1.100:9100"
+
+# Default location used to look up the weather on https://wttr.in.
+location = "London"
+
+# Address printed as the receipt header (alongside the current date).
+address = "11 Example Street, Townsville, AB1 2CD"
+
+# Optional: one or more Google Calendar "secret iCal" sources. When set,
+# today's meetings are printed below the weather. Get each URL from Google
+# Calendar -> Settings -> [your calendar] -> "Integrate calendar" ->
+# "Secret address in iCal format". `name` is optional and, when given, is
+# shown next to that calendar's meetings.
+# [[calendars]]
+# name = "Work"
+# ics_url = "https://calendar.google.com/calendar/ical/.../basic.ics"
+#
+# [[calendars]]
+# name = "Family"
+# ics_url = "https://calendar.google.com/calendar/ical/.../basic.ics"
+
+# Optional: public-transport departures via TransportAPI. When set, the nearest
+# train stations and bus stops (with their next departures) are printed below
+# the meetings. Without `--at` these are live and shown for today only; with
+# `--at HHMM` the scheduled timetable for the chosen date/time is used. Get a
+# free app_id/app_key from https://developer.transportapi.com. The search
+# location is taken from the postcode in `address`; override it with `postcode`,
+# or with explicit `lat`/`lon`.
+[transport]
+app_id = "your-app-id"
+app_key = "your-app-key"
+# postcode = "AB1 2CD"   # optional; defaults to the postcode in `address`
+# lat = 51.5074          # optional; overrides the postcode lookup
+# lon = -0.1278          # optional; overrides the postcode lookup
+# stations = 3           # nearest train stations to show (default 3)
+# bus_stops = 3          # nearest bus stops to show (default 3)
+departures = 3           # departures listed per stop (default 3; 0 disables transport)
+#
+# Overrides: pin specific stops instead of searching by location. When set,
+# these replace the nearest-stop search for that mode (so `stations`/`bus_stops`
+# are ignored). Train codes are CRS; bus codes are ATCO.
+# station_codes = ["ABC", "XYZ"]
+# bus_stop_codes = ["490000000A"]
+# routes = ["12"]   # only show these bus routes/lines (all if empty)
+
+# Optional: on-disk cache/history for every external call (weather, geocoding,
+# and transport). Identical requests within `ttl_minutes` are served from the
+# database instead of the network, and every dated result is kept so a later run
+# for a now-past date still works. TransportAPI keys are redacted before any
+# response is stored. Delete the file to clear it. Bypass with `--no-cache` or
+# force a live refetch with `--refresh`.
+[cache]
+path = "cache.sqlite"   # SQLite database file (default "cache.sqlite")
+ttl_minutes = 30        # how long a live result stays fresh (default 30)
+
+# Settings for the image rendering used by default (and --imageText / --output).
+[image]
+# Print width in dots (80mm = 576, 58mm = 384). Must be a multiple of 8.
+width = 576
+# Font used to rasterize the report. A Nerd Font gives the widest glyph coverage.
+font = "fonts/JetBrainsMonoNerdFontMono-Regular.ttf"
+# Body font size, in pixels.
+font_size = 28.0

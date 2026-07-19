@@ -1,0 +1,15 @@
+/target
+
+# Local configuration with secrets (TransportAPI keys, private calendar URLs).
+# Copy settings.example.toml to settings.toml and edit it.
+/settings.toml
+
+# On-disk cache/history database for external API calls.
+/cache.sqlite
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+
+# Generated preview / render images.
+*.png
