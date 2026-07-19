@@ -324,12 +324,15 @@ fn main() -> Result<()> {
 /// Initialise logging. `-v` enables this crate's debug logs, `-vv` its trace
 /// logs (dependencies stay at `warn` to avoid noise). `RUST_LOG`, if set, always
 /// takes precedence. Logs are written to stderr.
+///
+/// `rrule` is pinned to `error` because it logs a spurious `warn` about
+/// `EXDATE;VALUE=DATE` (valid iCal it doesn't fully support) on every run.
 fn init_logging(verbose: u8) {
     let crate_name = env!("CARGO_CRATE_NAME");
     let default = match verbose {
-        0 => "warn".to_string(),
-        1 => format!("warn,{crate_name}=debug"),
-        _ => format!("warn,{crate_name}=trace"),
+        0 => "warn,rrule=error".to_string(),
+        1 => format!("warn,rrule=error,{crate_name}=debug"),
+        _ => format!("warn,rrule=error,{crate_name}=trace"),
     };
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default))
         .format_timestamp(None)
