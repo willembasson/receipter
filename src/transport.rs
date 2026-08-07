@@ -432,10 +432,10 @@ fn remember_names(cache: Option<&Cache>, places: &[Place]) {
 
 /// Record a single stop code -> name mapping (from a place or a live board).
 fn remember_name(cache: Option<&Cache>, code: &str, name: &str) {
-    if let Some(c) = cache {
-        if c.lookup("name", code).ok().flatten().as_deref() != Some(name) {
-            let _ = c.store("name", code, None, name);
-        }
+    if let Some(c) = cache
+        && c.lookup("name", code).ok().flatten().as_deref() != Some(name)
+    {
+        let _ = c.store("name", code, None, name);
     }
 }
 
