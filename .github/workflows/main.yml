@@ -16,7 +16,26 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+
+    # Caches ~/.cargo and target/, keyed on Cargo.lock. escpos enables the image
+    # crate's default features, which pulls in AVIF support (ravif/rav1e) and is
+    # slow to compile from scratch, so this saves most of the time on reruns.
+    - name: Cache cargo registry and build output
+      uses: Swatinem/rust-cache@v2
+
+    - name: Check formatting
+      run: cargo fmt --check
+
+    # `-D warnings` goes after `--` so it applies only to this crate. Setting it
+    # via RUSTFLAGS would apply it to every dependency too, and a warning in
+    # somebody else's crate would then fail our build.
+    - name: Clippy
+      run: cargo clippy --locked --all-targets -- -D warnings
+
+    # --locked makes CI use the committed Cargo.lock verbatim and fail if it is
+    # out of date, so dependencies can never be silently upgraded here.
     - name: Build
-      run: cargo build --verbose
+      run: cargo build --locked --verbose
+
     - name: Run tests
-      run: cargo test --verbose
+      run: cargo test --locked --verbose

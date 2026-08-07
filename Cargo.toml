@@ -11,7 +11,12 @@ chrono = "0.4.45"
 chrono-tz = "0.10.4"
 clap = { version = "4.6.1", features = ["derive"] }
 env_logger = "0.11.11"
-escpos = { version = "0.19.0", features = ["full"] }
+# Only the network and console drivers are used, plus `graphics` for
+# `bit_image_from_bytes_option`. The `full` feature additionally pulls in USB,
+# HID and serial support (rusb/nusb/hidapi/serialport), which drag in libusb and
+# libudev as system libraries — a build failure on a bare Linux CI runner, and a
+# pointless libusb link on macOS.
+escpos = { version = "0.19.0", default-features = false, features = ["std", "graphics"] }
 ical = { version = "0.11.0", features = ["ical"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp"] }
 imageproc = { version = "0.27.0", default-features = false, features = ["text"] }

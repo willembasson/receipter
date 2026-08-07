@@ -310,15 +310,15 @@ fn parse_google_events(json: &str, calendar_name: Option<&str>) -> Result<Vec<Me
                     calendar: calendar.clone(),
                 });
             }
-        } else if let Some(d) = start.date.as_deref() {
-            if let Ok(date) = NaiveDate::parse_from_str(d, "%Y-%m-%d") {
-                meetings.push(Meeting {
-                    start: local_midnight(date),
-                    all_day: true,
-                    summary,
-                    calendar: calendar.clone(),
-                });
-            }
+        } else if let Some(d) = start.date.as_deref()
+            && let Ok(date) = NaiveDate::parse_from_str(d, "%Y-%m-%d")
+        {
+            meetings.push(Meeting {
+                start: local_midnight(date),
+                all_day: true,
+                summary,
+                calendar: calendar.clone(),
+            });
         }
     }
 
@@ -385,25 +385,26 @@ fn collect_occurrences(
 
     // Single (non-recurring) event.
     if all_day {
-        if let Some(date) = dtstart.value.as_deref().and_then(parse_ics_date) {
-            if date == day_start.date_naive() {
-                out.push(Meeting {
-                    start: local_midnight(date),
-                    all_day: true,
-                    summary,
-                    calendar,
-                });
-            }
-        }
-    } else if let Some(start) = parse_ics_datetime(dtstart) {
-        if start >= day_start && start < day_end {
+        if let Some(date) = dtstart.value.as_deref().and_then(parse_ics_date)
+            && date == day_start.date_naive()
+        {
             out.push(Meeting {
-                start,
-                all_day: false,
+                start: local_midnight(date),
+                all_day: true,
                 summary,
                 calendar,
             });
         }
+    } else if let Some(start) = parse_ics_datetime(dtstart)
+        && start >= day_start
+        && start < day_end
+    {
+        out.push(Meeting {
+            start,
+            all_day: false,
+            summary,
+            calendar,
+        });
     }
 }
 

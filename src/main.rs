@@ -568,10 +568,10 @@ async fn forecast_report(
     target: NaiveDate,
 ) -> Result<Option<String>> {
     let key = weather_key_forecast(location, target);
-    if let Some(c) = cache {
-        if let Some(hit) = c.get_fresh("forecast", &key, Some(target), false)? {
-            return Ok(Some(hit));
-        }
+    if let Some(c) = cache
+        && let Some(hit) = c.get_fresh("forecast", &key, Some(target), false)?
+    {
+        return Ok(Some(hit));
     }
     match fetch_forecast(location, target).await? {
         Some(text) => {
@@ -964,7 +964,7 @@ fn lighten_toward_white(img: &mut GrayImage, percent: u8) {
 /// The printer packs its raster data eight dots to a byte, so the configured
 /// print width has to be a whole number of bytes.
 fn check_print_width(cfg: &ImageSettings) -> Result<()> {
-    if cfg.width == 0 || cfg.width % 8 != 0 {
+    if cfg.width == 0 || !cfg.width.is_multiple_of(8) {
         bail!(
             "image width must be a positive multiple of 8 (got {})",
             cfg.width
@@ -1268,7 +1268,7 @@ fn print_kitty_image(png: &[u8]) -> Result<()> {
 /// dependency solely for the kitty image transport.
 fn base64_encode(data: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
         let b0 = chunk[0];
         let b1 = chunk.get(1).copied().unwrap_or(0);
