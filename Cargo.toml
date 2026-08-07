@@ -13,7 +13,7 @@ clap = { version = "4.6.1", features = ["derive"] }
 env_logger = "0.11.11"
 escpos = { version = "0.19.0", features = ["full"] }
 ical = { version = "0.11.0", features = ["ical"] }
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp"] }
 imageproc = { version = "0.27.0", default-features = false, features = ["text"] }
 jsonwebtoken = "9.3.1"
 log = "0.4.33"

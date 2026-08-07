@@ -15,7 +15,7 @@
 
 use std::collections::HashMap;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use chrono::{Local, NaiveDate, NaiveDateTime};
 use serde::Deserialize;
 

@@ -15,7 +15,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local, NaiveDate};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 
 pub struct Cache {
     conn: Connection,

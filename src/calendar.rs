@@ -228,8 +228,12 @@ async fn service_account_token(key: &ServiceAccountKey) -> Result<String> {
 
 /// Fetch the raw `events.list` JSON for `date` from the Google Calendar API.
 async fn fetch_google_events(source: &ServiceAccountSource, date: NaiveDate) -> Result<String> {
-    let raw = std::fs::read_to_string(&source.key_file)
-        .with_context(|| format!("reading service-account key `{}`", source.key_file.display()))?;
+    let raw = std::fs::read_to_string(&source.key_file).with_context(|| {
+        format!(
+            "reading service-account key `{}`",
+            source.key_file.display()
+        )
+    })?;
     let key: ServiceAccountKey =
         serde_json::from_str(&raw).context("parsing service-account key JSON")?;
     let token = service_account_token(&key).await?;
@@ -553,9 +557,11 @@ mod tests {
         assert_eq!(meetings.len(), 2);
 
         // The calendar name is carried through and shown on the line.
-        assert!(meetings
-            .iter()
-            .all(|m| m.calendar.as_deref() == Some("Work")));
+        assert!(
+            meetings
+                .iter()
+                .all(|m| m.calendar.as_deref() == Some("Work"))
+        );
         assert!(meetings.iter().any(|m| m.line().contains("(Work)")));
     }
 
@@ -623,9 +629,17 @@ mod tests {
         assert_eq!(meetings[0].summary, "Holiday");
         assert!(meetings[0].all_day);
         // The 09:30 timed event is kept and not marked all-day.
-        assert!(meetings.iter().any(|m| m.summary == "Standup" && !m.all_day));
+        assert!(
+            meetings
+                .iter()
+                .any(|m| m.summary == "Standup" && !m.all_day)
+        );
         // A missing summary falls back to a placeholder.
         assert!(meetings.iter().any(|m| m.summary == "(no title)"));
-        assert!(meetings.iter().all(|m| m.calendar.as_deref() == Some("Work")));
+        assert!(
+            meetings
+                .iter()
+                .all(|m| m.calendar.as_deref() == Some("Work"))
+        );
     }
 }

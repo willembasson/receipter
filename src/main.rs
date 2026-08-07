@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::Cursor;
+use std::io::{Cursor, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -95,6 +95,37 @@ struct Cli {
     /// Write the rendered image to a PNG file instead of printing (preview mode).
     #[arg(short, long, value_name = "FILE", conflicts_with_all = ["stdout", "raw"])]
     output: Option<PathBuf>,
+
+    /// How to reduce a printed image to the printer's pure black and white:
+    /// `auto` dithers photographs but keeps an already black-and-white image
+    /// (such as a receipt) crisp, `on` always dithers, `off` always thresholds.
+    #[arg(long, value_name = "MODE", value_enum, default_value_t = Dither::Auto)]
+    dither: Dither,
+
+    /// Lighten a printed image by this percentage before it is reduced to black
+    /// and white (0 = unchanged, 100 = blank). Thermal paper spreads each dot,
+    /// so a dithered photo usually prints darker than it looks on screen; try
+    /// `--lighten 30` to lay down 30% fewer dots.
+    #[arg(long, value_name = "PERCENT", default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..=100))]
+    lighten: u8,
+
+    /// Print this image instead of the report (PNG, JPEG, GIF, BMP or WebP).
+    /// Use `-` to read it from stdin; an image piped in on stdin is picked up
+    /// automatically.
+    #[arg(value_name = "IMAGE")]
+    image: Option<PathBuf>,
+}
+
+/// How an image is reduced to the two levels the printer can actually put on
+/// paper. See [`prepare_image_for_print`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum Dither {
+    /// Dither only images with enough mid-tones to need it.
+    Auto,
+    /// Always dither.
+    On,
+    /// Never dither; threshold at mid-gray.
+    Off,
 }
 
 /// Values loaded from the settings file. CLI arguments take precedence.
@@ -165,10 +196,18 @@ async fn main() -> Result<()> {
 
     let settings = load_settings(&cli.config)?;
 
-    let location = cli.location.unwrap_or(settings.location);
-    let endpoint = cli.endpoint.unwrap_or(settings.endpoint);
+    let location = cli.location.clone().unwrap_or(settings.location);
+    let endpoint = cli.endpoint.clone().unwrap_or(settings.endpoint);
     let address = settings.address;
     log::debug!("loaded settings from `{}`", cli.config.display());
+
+    // Image passthrough: an image given as an argument, or piped in on stdin,
+    // is printed as-is. None of the report lookups happen in this mode.
+    if let Some(bytes) = read_input_image(cli.image.as_deref())? {
+        log::debug!("input: {} byte(s) of image data", bytes.len());
+        let png = prepare_image_for_print(&bytes, &settings.image, cli.dither, cli.lighten)?;
+        return output_image(&cli, &endpoint, &png, &settings.image);
+    }
 
     // Open the cache up front so every external call can read/write it. A cache
     // failure is non-fatal: we just run without it.
@@ -292,11 +331,12 @@ async fn main() -> Result<()> {
         println!("Wrote weather image to {}", path.display());
     } else if cli.stdout {
         if cli.image_text {
-            // Render the receipt as an image and show it inline via the kitty
-            // graphics protocol (works in kitty and compatible terminals).
-            log::debug!("output: inline image to stdout (kitty graphics protocol)");
+            // Render the receipt as an image and either show it inline (kitty
+            // graphics protocol) or, when stdout is redirected, emit the PNG
+            // bytes so they can be piped or saved.
+            log::debug!("output: inline image to stdout");
             let png = build_report_png(&address, &date, &report, &settings.image)?;
-            print_kitty_image(&png)?;
+            emit_image_to_stdout(&png)?;
         } else {
             log::debug!("output: report text to stdout");
             print!("{report}");
@@ -658,7 +698,11 @@ fn render_image<D: Driver>(
     cfg: &ImageSettings,
 ) -> Result<()> {
     let png = build_report_png(address, date, report, cfg)?;
+    render_bit_image(driver, &png, cfg)
+}
 
+/// Send an already-encoded image to any ESC/POS driver as a raster graphic.
+fn render_bit_image<D: Driver>(driver: D, png: &[u8], cfg: &ImageSettings) -> Result<()> {
     let mut printer = Printer::new(driver, Protocol::default(), Some(PrinterOptions::default()));
     printer.init()?;
 
@@ -666,10 +710,253 @@ fn render_image<D: Driver>(
         .context("building bit image options")?;
 
     printer
-        .bit_image_from_bytes_option(&png, option)?
+        .bit_image_from_bytes_option(png, option)?
         .feed()?
         .print_cut()?;
 
+    Ok(())
+}
+
+/// The image to print instead of the report, if there is one.
+///
+/// It comes from `path` when given (`-` meaning stdin), or from stdin when
+/// that's been redirected — so `receipter --stdout --imageText | receipter`
+/// prints the piped receipt. `None` means there's no image and the usual report
+/// should be built; stdin is left alone when it's a terminal, so an interactive
+/// run never waits for input.
+fn read_input_image(path: Option<&Path>) -> Result<Option<Vec<u8>>> {
+    if let Some(path) = path {
+        if path == Path::new("-") {
+            let bytes = read_stdin()?;
+            if bytes.is_empty() {
+                bail!("no image data on stdin");
+            }
+            return Ok(Some(bytes));
+        }
+        let bytes =
+            fs::read(path).with_context(|| format!("reading image `{}`", path.display()))?;
+        return Ok(Some(bytes));
+    }
+
+    if std::io::stdin().is_terminal() {
+        return Ok(None);
+    }
+
+    // Redirected but empty (e.g. `< /dev/null`, or a cron job): carry on and
+    // build the report as usual.
+    let bytes = read_stdin()?;
+    Ok((!bytes.is_empty()).then_some(bytes))
+}
+
+fn read_stdin() -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    std::io::stdin()
+        .lock()
+        .read_to_end(&mut bytes)
+        .context("reading image data from stdin")?;
+    Ok(bytes)
+}
+
+/// Turn an arbitrary image into a PNG the printer can reproduce: composited
+/// onto white, scaled to the full print width, and reduced to pure black and
+/// white.
+///
+/// The printer has no grays — it inks every pixel darker than mid-gray — so the
+/// reduction happens here, where the choice can be made deliberately.
+/// Thresholding keeps text and line art crisp but flattens a photograph into
+/// blotches; Floyd-Steinberg dithering keeps a photograph legible but stipples
+/// the anti-aliased edges of text. [`Dither::Auto`] picks per image, so a
+/// receipt piped straight back in prints exactly as it would have directly.
+///
+/// `lighten` blends the image toward paper white first, to compensate for a
+/// printer that lays down more ink than the image asks for.
+fn prepare_image_for_print(
+    bytes: &[u8],
+    cfg: &ImageSettings,
+    dither: Dither,
+    lighten: u8,
+) -> Result<Vec<u8>> {
+    check_print_width(cfg)?;
+
+    let img = image::load_from_memory(bytes)
+        .context("decoding the image (PNG, JPEG, GIF, BMP and WebP are supported)")?;
+    let (src_width, src_height) = (img.width(), img.height());
+    if src_width == 0 || src_height == 0 {
+        bail!("the image is empty");
+    }
+
+    let mut gray = flatten_onto_white(&img);
+
+    if src_width != cfg.width {
+        // Scale to the exact print width, keeping the aspect ratio, so small
+        // images fill the paper and large ones aren't clipped.
+        let height = (u64::from(src_height) * u64::from(cfg.width) / u64::from(src_width)).max(1);
+        let height = u32::try_from(height).unwrap_or(u32::MAX);
+        log::debug!(
+            "scaling image from {src_width}x{src_height} to {}x{height}",
+            cfg.width
+        );
+        gray = image::imageops::resize(
+            &gray,
+            cfg.width,
+            height,
+            image::imageops::FilterType::Lanczos3,
+        );
+    }
+
+    if gray.height() > u32::from(u16::MAX) {
+        bail!(
+            "the image is {} dots tall at the print width, above the printer's limit of {}",
+            gray.height(),
+            u16::MAX
+        );
+    }
+
+    // Decide this before lightening: a heavily lightened photograph has few
+    // mid-tones left, but it still needs the dithering to show anything at all.
+    let dither = match dither {
+        Dither::On => true,
+        Dither::Off => false,
+        Dither::Auto => has_midtones(&gray),
+    };
+
+    if lighten > 0 {
+        log::debug!("lightening the image by {lighten}%");
+        lighten_toward_white(&mut gray, lighten);
+    }
+
+    if dither {
+        log::debug!("dithering the image to black and white");
+        image::imageops::dither(&mut gray, &image::imageops::BiLevel);
+    } else {
+        // Threshold with the printer's own rule (it inks every pixel <= 128) so
+        // the PNG is exactly what comes out on paper.
+        for px in gray.pixels_mut() {
+            px.0[0] = if px.0[0] <= 128 { 0 } else { 255 };
+        }
+    }
+
+    if lighten > 0 && gray.pixels().all(|p| p.0[0] != 0) {
+        // Thresholding has no half measures, so lightening solid black past the
+        // half-way point wipes it out completely rather than thinning it.
+        eprintln!(
+            "warning: nothing is left to print after --lighten {lighten}{}",
+            if dither {
+                ""
+            } else {
+                "; try a lower percentage, or --dither on to thin the artwork instead of dropping it"
+            }
+        );
+    }
+
+    let mut png = Vec::new();
+    DynamicImage::ImageLuma8(gray)
+        .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
+        .context("encoding the prepared image to PNG")?;
+
+    Ok(png)
+}
+
+/// Blend an image `percent` of the way toward paper white.
+///
+/// Dithering renders a tone by inking that fraction of the dots, so scaling the
+/// distance from white scales the ink coverage by the same amount: at 30%, a
+/// region that would have inked 60% of its dots inks 42% of them instead. That
+/// is the knob to reach for when a photo prints muddy, because thermal dots
+/// bleed into each other and cover more paper than the image asked for.
+///
+/// Thresholded artwork is barely affected until the percentage passes 50: solid
+/// black has to lighten past mid-gray before it stops being inked, and then it
+/// drops out all at once. `--dither on` thins such artwork smoothly instead.
+fn lighten_toward_white(img: &mut GrayImage, percent: u8) {
+    let percent = u32::from(percent.min(100));
+    for px in img.pixels_mut() {
+        let v = u32::from(px.0[0]);
+        px.0[0] = (v + (255 - v) * percent / 100) as u8;
+    }
+}
+
+/// The printer packs its raster data eight dots to a byte, so the configured
+/// print width has to be a whole number of bytes.
+fn check_print_width(cfg: &ImageSettings) -> Result<()> {
+    if cfg.width == 0 || cfg.width % 8 != 0 {
+        bail!(
+            "image width must be a positive multiple of 8 (got {})",
+            cfg.width
+        );
+    }
+    Ok(())
+}
+
+/// The share of mid-tone pixels above which [`Dither::Auto`] dithers. Text and
+/// line art sit around 5% (only their anti-aliased edges are gray), while
+/// photographs and gradients are well above 80%, so anything in between is a
+/// safe cut-off.
+const MIDTONE_RATIO: f64 = 0.20;
+
+/// Whether an image has enough gray in it that thresholding would wreck it.
+fn has_midtones(img: &GrayImage) -> bool {
+    let total = u64::from(img.width()) * u64::from(img.height());
+    if total == 0 {
+        return false;
+    }
+    let midtones = img.pixels().filter(|p| (24..232).contains(&p.0[0])).count() as f64;
+    midtones / total as f64 > MIDTONE_RATIO
+}
+
+/// Composite an image onto a white background and convert it to grayscale.
+///
+/// Transparent areas would otherwise come out as solid black once the alpha
+/// channel is dropped, so they're filled with paper white instead.
+fn flatten_onto_white(img: &DynamicImage) -> GrayImage {
+    let rgba = img.to_rgba8();
+    let mut out = GrayImage::new(rgba.width(), rgba.height());
+    for (x, y, px) in rgba.enumerate_pixels() {
+        let alpha = u32::from(px[3]);
+        let over = |c: u8| (u32::from(c) * alpha + 255 * (255 - alpha)) / 255;
+        let luma = (299 * over(px[0]) + 587 * over(px[1]) + 114 * over(px[2])) / 1000;
+        out.put_pixel(x, y, Luma([luma as u8]));
+    }
+    out
+}
+
+/// Send a prepared image to wherever the CLI flags point: a PNG file, stdout,
+/// the raw ESC/POS stream, or the printer.
+fn output_image(cli: &Cli, endpoint: &str, png: &[u8], cfg: &ImageSettings) -> Result<()> {
+    if let Some(path) = cli.output.as_deref() {
+        log::debug!("output: writing PNG to `{}`", path.display());
+        fs::write(path, png).with_context(|| format!("writing image to `{}`", path.display()))?;
+        println!("Wrote image to {}", path.display());
+    } else if cli.stdout {
+        log::debug!("output: image to stdout");
+        emit_image_to_stdout(png)?;
+    } else if cli.raw {
+        log::debug!("output: raw ESC/POS byte stream to stdout");
+        render_bit_image(ConsoleDriver::open(true), png, cfg)?;
+    } else {
+        log::debug!("output: image to printer `{endpoint}`");
+        let (host, port) = parse_endpoint(endpoint)?;
+        let driver = NetworkDriver::open(host, port, Some(Duration::from_secs(5)))
+            .with_context(|| format!("connecting to printer at `{endpoint}`"))?;
+        render_bit_image(driver, png, cfg)?;
+    }
+
+    Ok(())
+}
+
+/// Write a PNG to stdout: inline via the kitty graphics protocol when stdout is
+/// a terminal, or as the raw PNG bytes when it's redirected, so the image can be
+/// piped into another command (`receipter --stdout --imageText | receipter`) or
+/// saved to a file.
+fn emit_image_to_stdout(png: &[u8]) -> Result<()> {
+    if std::io::stdout().is_terminal() {
+        return print_kitty_image(png);
+    }
+
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    out.write_all(png).context("writing the image to stdout")?;
+    out.flush()?;
     Ok(())
 }
 
@@ -729,12 +1016,7 @@ fn build_report_png(
     report: &str,
     cfg: &ImageSettings,
 ) -> Result<Vec<u8>> {
-    if cfg.width == 0 || cfg.width % 8 != 0 {
-        bail!(
-            "image width must be a positive multiple of 8 (got {})",
-            cfg.width
-        );
-    }
+    check_print_width(cfg)?;
 
     let font_bytes = fs::read(&cfg.font)
         .with_context(|| format!("reading font file `{}`", cfg.font.display()))?;
@@ -866,8 +1148,6 @@ fn build_report_png(
 /// that implement the same protocol (e.g. WezTerm, Ghostty); other terminals
 /// will just show the raw escape codes.
 fn print_kitty_image(png: &[u8]) -> Result<()> {
-    use std::io::Write;
-
     let encoded = base64_encode(png);
     let bytes = encoded.as_bytes();
     if bytes.is_empty() {
@@ -1017,6 +1297,141 @@ mod tests {
         // Leave a preview on disk for manual inspection.
         let _ = fs::create_dir_all("target");
         fs::write("target/weather-preview.png", &png).unwrap();
+    }
+
+    #[test]
+    fn a_piped_receipt_survives_the_round_trip() {
+        // `receipter --stdout --imageText | receipter` re-prints the receipt, so
+        // the PNG must come back at the print width and print identically: it is
+        // already the right size, and `Dither::Auto` leaves black-and-white
+        // artwork like this alone.
+        let cfg = ImageSettings::default();
+        let png = build_report_png(
+            "11 Example Street",
+            "Wednesday, 15 July 2026",
+            "Sunny\n",
+            &cfg,
+        )
+        .expect("png should build");
+        let original = image::load_from_memory(&png).unwrap().to_luma8();
+
+        let prepared =
+            prepare_image_for_print(&png, &cfg, Dither::Auto, 0).expect("image should prepare");
+        let prepared = image::load_from_memory(&prepared).unwrap().to_luma8();
+
+        assert_eq!(prepared.dimensions(), original.dimensions());
+        // The printer inks every pixel <= 128, so compare the dots themselves.
+        let inked = |p: &Luma<u8>| p.0[0] <= 128;
+        assert!(
+            original
+                .pixels()
+                .zip(prepared.pixels())
+                .all(|(before, after)| inked(before) == inked(after)),
+            "the round-tripped receipt should print dot for dot"
+        );
+    }
+
+    #[test]
+    fn scales_an_image_to_the_print_width_in_black_and_white() {
+        let cfg = ImageSettings::default();
+
+        // A 4x2 mid-gray image with a transparent corner: too small, too gray,
+        // and too transparent to print directly.
+        let mut src = image::RgbaImage::from_pixel(4, 2, image::Rgba([128, 128, 128, 255]));
+        src.put_pixel(0, 0, image::Rgba([0, 0, 0, 0]));
+        let mut bytes = Vec::new();
+        DynamicImage::ImageRgba8(src)
+            .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .unwrap();
+
+        let prepared =
+            prepare_image_for_print(&bytes, &cfg, Dither::Auto, 0).expect("image should prepare");
+        let out = image::load_from_memory(&prepared).unwrap().to_luma8();
+
+        assert_eq!(out.width(), cfg.width);
+        assert_eq!(out.height(), cfg.width / 2); // 4x2 keeps its 2:1 aspect ratio
+        assert!(out.pixels().all(|p| p.0[0] == 0 || p.0[0] == 255));
+        // The transparent corner became paper white, not solid black.
+        assert_eq!(out.get_pixel(0, 0).0[0], 255);
+        // All that gray is dithered rather than thresholded away, so the result
+        // is a mix of inked and blank dots.
+        assert!(out.pixels().any(|p| p.0[0] == 0));
+        assert!(out.pixels().any(|p| p.0[0] == 255));
+
+        // Forcing it off thresholds instead: mid-gray inks every dot.
+        let flat =
+            prepare_image_for_print(&bytes, &cfg, Dither::Off, 0).expect("image should prepare");
+        let flat = image::load_from_memory(&flat).unwrap().to_luma8();
+        assert!(
+            flat.pixels().filter(|p| p.0[0] == 0).count()
+                > (flat.width() * flat.height() / 2) as usize
+        );
+    }
+
+    #[test]
+    fn lightening_lays_down_fewer_dots() {
+        let cfg = ImageSettings::default();
+        let src = image::RgbaImage::from_pixel(64, 64, image::Rgba([128, 128, 128, 255]));
+        let mut bytes = Vec::new();
+        DynamicImage::ImageRgba8(src)
+            .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .unwrap();
+
+        let inked = |percent: u8| {
+            let png = prepare_image_for_print(&bytes, &cfg, Dither::On, percent)
+                .expect("image should prepare");
+            let img = image::load_from_memory(&png).unwrap().to_luma8();
+            let total = (img.width() * img.height()) as f64;
+            img.pixels().filter(|p| p.0[0] == 0).count() as f64 / total
+        };
+
+        // Dithering inks the tone's share of the dots, and lightening scales
+        // that share down by the same percentage.
+        let full = inked(0);
+        assert!(
+            (full - 0.5).abs() < 0.02,
+            "mid-gray should ink ~50%: {full}"
+        );
+        for percent in [30, 60] {
+            let expected = full * (1.0 - f64::from(percent) / 100.0);
+            let got = inked(percent);
+            assert!(
+                (got - expected).abs() < 0.02,
+                "--lighten {percent} should ink ~{expected:.2} of the dots, inked {got:.2}"
+            );
+        }
+        assert_eq!(inked(100), 0.0, "--lighten 100 should ink nothing");
+    }
+
+    #[test]
+    fn warns_instead_of_silently_printing_a_blank_receipt() {
+        // Thresholded artwork drops out all at once past 50%, so the blank-page
+        // check has to catch it.
+        let cfg = ImageSettings::default();
+        let png = build_report_png(
+            "11 Example Street",
+            "Wednesday, 15 July 2026",
+            "Sunny\n",
+            &cfg,
+        )
+        .expect("png should build");
+
+        let blanked = prepare_image_for_print(&png, &cfg, Dither::Off, 60).unwrap();
+        let blanked = image::load_from_memory(&blanked).unwrap().to_luma8();
+        assert!(blanked.pixels().all(|p| p.0[0] != 0));
+
+        // Dithering the same thing keeps it faint but present.
+        let thinned = prepare_image_for_print(&png, &cfg, Dither::On, 60).unwrap();
+        let thinned = image::load_from_memory(&thinned).unwrap().to_luma8();
+        assert!(thinned.pixels().any(|p| p.0[0] == 0));
+    }
+
+    #[test]
+    fn rejects_input_that_is_not_an_image() {
+        let err =
+            prepare_image_for_print(b"not an image", &ImageSettings::default(), Dither::Auto, 0)
+                .expect_err("garbage should not decode");
+        assert!(err.to_string().contains("decoding the image"));
     }
 
     #[test]
