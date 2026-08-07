@@ -158,7 +158,8 @@ impl Default for ImageSettings {
     }
 }
 
-fn main() -> Result<()> {
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<()> {
     let cli = Cli::parse();
     init_logging(cli.verbose);
 
@@ -201,7 +202,7 @@ fn main() -> Result<()> {
     if cli.list_stops {
         match &settings.transport {
             Some(cfg) => {
-                print!("{}", transport::list_stops(cfg, &address, cache)?);
+                print!("{}", transport::list_stops(cfg, &address, cache).await?);
                 return Ok(());
             }
             None => bail!("--list-stops needs a [transport] section with app_id/app_key"),
@@ -225,7 +226,7 @@ fn main() -> Result<()> {
     // Weather: today uses wttr.in's ASCII art; a future date within the forecast
     // window uses the JSON forecast; a past date is served from cache history.
     // Results are cached (and dated) so a later run for a past date still works.
-    let report = weather_report(cache, &location, cli.days, target_date, today)?;
+    let report = weather_report(cache, &location, cli.days, target_date, today).await?;
 
     // Append the day's meetings below the weather when calendars are configured.
     // A calendar failure shouldn't stop the rest from printing.
@@ -244,7 +245,7 @@ fn main() -> Result<()> {
         append_meetings(
             &report,
             heading,
-            &calendar::meetings_on(&settings.calendars, target_date, cache),
+            &calendar::meetings_on(&settings.calendars, target_date, cache).await,
         )
     };
 
@@ -266,7 +267,7 @@ fn main() -> Result<()> {
                 when.map(|w| w.format("%Y-%m-%d %H:%M").to_string())
                     .unwrap_or_else(|| "live".to_string())
             );
-            match transport::nearby_departures(cfg, &address, when, cache, columns, icons) {
+            match transport::nearby_departures(cfg, &address, when, cache, columns, icons).await {
                 Ok(body) => {
                     let heading = match cli.at {
                         Some(t) => format!("Transport from {}", t.format("%H:%M")),
@@ -387,7 +388,7 @@ fn load_settings(path: &Path) -> Result<Settings> {
 /// - today  -> wttr.in ASCII current conditions (cached, TTL);
 /// - future -> wttr.in JSON forecast for that date (cached per date);
 /// - past   -> whatever was previously stored for that date, if anything.
-fn weather_report(
+async fn weather_report(
     cache: Option<&cache::Cache>,
     location: &str,
     days: u8,
@@ -406,11 +407,12 @@ fn weather_report(
                 false,
                 || fetch_weather(location, days),
             )
+            .await
         }
         Ordering::Greater => {
             log::debug!("weather: forecast for future date");
             Ok(
-                forecast_report(cache, location, target)?.unwrap_or_else(|| {
+                forecast_report(cache, location, target).await?.unwrap_or_else(|| {
                     "No weather available for this date.\n(wttr.in only forecasts the next few days.)"
                         .to_string()
                 }),
@@ -435,7 +437,7 @@ fn weather_report(
 
 /// A cached-or-fetched forecast string for `target`, or `None` when the date is
 /// outside wttr.in's forecast window (and not already cached).
-fn forecast_report(
+async fn forecast_report(
     cache: Option<&cache::Cache>,
     location: &str,
     target: NaiveDate,
@@ -446,7 +448,7 @@ fn forecast_report(
             return Ok(Some(hit));
         }
     }
-    match fetch_forecast(location, target)? {
+    match fetch_forecast(location, target).await? {
         Some(text) => {
             if let Some(c) = cache {
                 c.store("forecast", &key, Some(target), &text)?;
@@ -466,18 +468,22 @@ fn weather_key_forecast(location: &str, date: NaiveDate) -> String {
 }
 
 /// Fetch a compact, color-free weather report for `location` from wttr.in.
-fn fetch_weather(location: &str, days: u8) -> Result<String> {
+async fn fetch_weather(location: &str, days: u8) -> Result<String> {
     let url = format!("https://wttr.in/{location}?{days}T");
 
     // wttr.in only returns plain text for terminal-style clients, so we
     // pretend to be curl. `?{days}T` asks for the requested number of forecast
     // days with no ANSI color codes, which keeps the output printer-friendly.
-    let body = ureq::get(&url)
+    let body = reqwest::Client::new()
+        .get(&url)
         .header("User-Agent", "curl/8.0.0")
-        .call()
+        .send()
+        .await
         .with_context(|| format!("requesting weather from `{url}`"))?
-        .body_mut()
-        .read_to_string()
+        .error_for_status()
+        .with_context(|| format!("weather request to `{url}` failed"))?
+        .text()
+        .await
         .context("reading weather response body")?;
 
     Ok(body)
@@ -520,15 +526,19 @@ struct ForecastDesc {
 
 /// Fetch a compact forecast for `target` from wttr.in's JSON API. Returns
 /// `Ok(None)` when the date is outside the short-range forecast window.
-fn fetch_forecast(location: &str, target: NaiveDate) -> Result<Option<String>> {
+async fn fetch_forecast(location: &str, target: NaiveDate) -> Result<Option<String>> {
     let url = format!("https://wttr.in/{location}?format=j1");
 
-    let body = ureq::get(&url)
+    let body = reqwest::Client::new()
+        .get(&url)
         .header("User-Agent", "curl/8.0.0")
-        .call()
+        .send()
+        .await
         .with_context(|| format!("requesting forecast from `{url}`"))?
-        .body_mut()
-        .read_to_string()
+        .error_for_status()
+        .with_context(|| format!("forecast request to `{url}` failed"))?
+        .text()
+        .await
         .context("reading forecast response body")?;
 
     let data: WttrForecast =

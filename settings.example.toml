@@ -15,18 +15,30 @@ location = "London"
 # Address printed as the receipt header (alongside the current date).
 address = "11 Example Street, Townsville, AB1 2CD"
 
-# Optional: one or more Google Calendar "secret iCal" sources. When set,
-# today's meetings are printed below the weather. Get each URL from Google
-# Calendar -> Settings -> [your calendar] -> "Integrate calendar" ->
-# "Secret address in iCal format". `name` is optional and, when given, is
-# shown next to that calendar's meetings.
+# Optional: one or more calendars whose meetings are printed below the weather.
+# Each entry has a `type`:
+#
+#   * type = "ics" — a Google Calendar "secret iCal" feed. Get the URL from
+#     Google Calendar -> Settings -> [your calendar] -> "Integrate calendar" ->
+#     "Secret address in iCal format".
+#
+#   * type = "service_account" — the Google Calendar API authenticated with a
+#     Google Cloud service account. Create a service account, enable the
+#     Calendar API, download its key JSON, and share the calendar read-only with
+#     the service account's email. Point `key_file` at the JSON (keep it out of
+#     version control) and set `calendar_id` (e.g. "you@gmail.com" or "primary").
+#
+# `name` is optional and, when given, is shown next to that calendar's meetings.
 # [[calendars]]
+# type = "ics"
 # name = "Work"
 # ics_url = "https://calendar.google.com/calendar/ical/.../basic.ics"
 #
 # [[calendars]]
+# type = "service_account"
 # name = "Family"
-# ics_url = "https://calendar.google.com/calendar/ical/.../basic.ics"
+# calendar_id = "you@gmail.com"
+# key_file = "google-service-account.json"
 
 # Optional: public-transport departures via TransportAPI. When set, the nearest
 # train stations and bus stops (with their next departures) are printed below
