@@ -111,7 +111,7 @@ departures = 3           # departures per stop (default 3)
 council = "Bromley"
 # postcode = "AB1 2CD"        # optional; defaults to the postcode in `address`
 # property = "11 Example St"  # optional; defaults to `address`
-# property_id = "3657977"     # optional; skips the address lookup entirely
+# property_id = "3678999"     # optional; skips the address lookup entirely
 # lead_days = 1               # days of notice (default 1, i.e. the day before)
 
 # Optional on-disk cache/history for every external call (weather, geocoding,
