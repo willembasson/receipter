@@ -256,9 +256,9 @@ mod tests {
     const ADDRESSES: &str = r#"
         <select class="govuk-select js-autocomplete" id="address" name="address" required>
           <option value=""></option>
-          <option value="3657967">1 Example Close, Townsville, AB1 2CD</option>
-          <option value="3657977">11 Example Close, Townsville, AB1 2CD</option>
-          <option value="3657978">12 Example Close, Townsville, AB1 2CD</option>
+          <option value="3678997">1 Example Close, Townsville, AB1 2CD</option>
+          <option value="3678998">11 Example Close, Townsville, AB1 2CD</option>
+          <option value="3678999">12 Example Close, Townsville, AB1 2CD</option>
         </select>"#;
 
     /// Trimmed from a real `GET /waste/<id>` response, keeping the markup that
@@ -317,7 +317,7 @@ mod tests {
     fn reads_every_address_option() {
         let options = parse_address_options(ADDRESSES);
         assert_eq!(options.len(), 3, "the blank option should be skipped");
-        assert_eq!(options[1].0, "3657977");
+        assert_eq!(options[1].0, "3678998");
         assert_eq!(options[1].1, "11 Example Close, Townsville, AB1 2CD");
     }
 
@@ -325,14 +325,14 @@ mod tests {
     fn matches_the_full_address() {
         let options = parse_address_options(ADDRESSES);
         let (id, _) = match_address(&options, "11 Example Close, Townsville, AB1 2CD").unwrap();
-        assert_eq!(id, "3657977");
+        assert_eq!(id, "3678998");
     }
 
     #[test]
     fn matches_on_house_and_street_alone() {
         let options = parse_address_options(ADDRESSES);
         let (id, addr) = match_address(&options, "11 Example Close").unwrap();
-        assert_eq!(id, "3657977");
+        assert_eq!(id, "3678998");
         assert_eq!(addr, "11 Example Close, Townsville, AB1 2CD");
     }
 
@@ -341,7 +341,7 @@ mod tests {
         let options = parse_address_options(ADDRESSES);
         assert_eq!(
             match_address(&options, "1 Example Close").unwrap().0,
-            "3657967"
+            "3678997"
         );
     }
 
