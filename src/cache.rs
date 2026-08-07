@@ -15,7 +15,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local, NaiveDate};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 
 pub struct Cache {
     conn: Connection,
@@ -135,18 +135,22 @@ impl Cache {
 
     /// Return a fresh cached value, or run `fetch`, store, and return it. On a
     /// fetch error, fall back to the newest stored response if there is one.
-    pub fn get_or_fetch(
+    pub async fn get_or_fetch<F, Fut>(
         &self,
         kind: &str,
         key: &str,
         for_date: Option<NaiveDate>,
         stable: bool,
-        fetch: impl FnOnce() -> Result<String>,
-    ) -> Result<String> {
+        fetch: F,
+    ) -> Result<String>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<String>>,
+    {
         if let Some(hit) = self.get_fresh(kind, key, for_date, stable)? {
             return Ok(hit);
         }
-        match fetch() {
+        match fetch().await {
             Ok(body) => {
                 log::debug!(
                     "fetched {kind} `{key}` from network; storing ({} bytes)",
@@ -196,17 +200,21 @@ impl Cache {
 }
 
 /// Convenience wrapper: use the cache when present, otherwise just fetch.
-pub fn cached(
+pub async fn cached<F, Fut>(
     cache: Option<&Cache>,
     kind: &str,
     key: &str,
     for_date: Option<NaiveDate>,
     stable: bool,
-    fetch: impl FnOnce() -> Result<String>,
-) -> Result<String> {
+    fetch: F,
+) -> Result<String>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<String>>,
+{
     match cache {
-        Some(c) => c.get_or_fetch(kind, key, for_date, stable, fetch),
-        None => fetch(),
+        Some(c) => c.get_or_fetch(kind, key, for_date, stable, fetch).await,
+        None => fetch().await,
     }
 }
 
@@ -219,23 +227,24 @@ mod tests {
         Cache::from_conn(Connection::open_in_memory().unwrap(), ttl_minutes, refresh).unwrap()
     }
 
-    #[test]
-    fn serves_a_fresh_hit_without_refetching() {
+    #[tokio::test]
+    async fn serves_a_fresh_hit_without_refetching() {
         let cache = mem(60, false);
         let calls = Cell::new(0);
-        let fetch = || {
-            calls.set(calls.get() + 1);
-            Ok("body".to_string())
-        };
 
         let a = cache
-            .get_or_fetch("weather", "k", None, false, fetch)
+            .get_or_fetch("weather", "k", None, false, || async {
+                calls.set(calls.get() + 1);
+                Ok("body".to_string())
+            })
+            .await
             .unwrap();
         let b = cache
-            .get_or_fetch("weather", "k", None, false, || {
+            .get_or_fetch("weather", "k", None, false, || async {
                 calls.set(calls.get() + 1);
                 Ok("body2".to_string())
             })
+            .await
             .unwrap();
 
         assert_eq!(a, "body");
@@ -243,16 +252,17 @@ mod tests {
         assert_eq!(calls.get(), 1);
     }
 
-    #[test]
-    fn expired_entries_refetch() {
+    #[tokio::test]
+    async fn expired_entries_refetch() {
         let cache = mem(0, false); // nothing is ever "fresh"
         let calls = Cell::new(0);
         for _ in 0..2 {
             cache
-                .get_or_fetch("weather", "k", None, false, || {
+                .get_or_fetch("weather", "k", None, false, || async {
                     calls.set(calls.get() + 1);
                     Ok("body".to_string())
                 })
+                .await
                 .unwrap();
         }
         assert_eq!(calls.get(), 2);
@@ -270,14 +280,15 @@ mod tests {
         assert_eq!(hit.as_deref(), Some("old"));
     }
 
-    #[test]
-    fn falls_back_to_cache_on_fetch_error() {
+    #[tokio::test]
+    async fn falls_back_to_cache_on_fetch_error() {
         let cache = mem(0, false);
         cache.store("train", "k", None, "cached").unwrap();
         let got = cache
-            .get_or_fetch("train", "k", None, false, || {
+            .get_or_fetch("train", "k", None, false, || async {
                 Err(anyhow::anyhow!("network down"))
             })
+            .await
             .unwrap();
         assert_eq!(got, "cached");
     }

@@ -15,7 +15,7 @@ Every external call (weather, geocoding, and transport) is cached in a local
 SQLite database, which doubles as a history so past dates can be reprinted.
 
 It can print directly to the printer, or preview the output to your terminal or
-a PNG file.
+a PNG file. It can also print an image you give it instead of the report.
 
 ## Installation
 
@@ -38,6 +38,10 @@ receipter --stdout
 
 # Preview as an image (full Unicode: arrows, degree signs, icons)
 receipter --output preview.png
+
+# Print any image (from a file, or piped in on stdin)
+receipter photo.jpg
+receipter --stdout --imageText | receipter
 ```
 
 ## Configuration
@@ -103,7 +107,8 @@ departures = 3           # departures per stop (default 3)
 path = "cache.sqlite"    # SQLite database file (default "cache.sqlite")
 ttl_minutes = 30         # how long a live result stays fresh (default 30)
 
-# Settings for the --imageText / --output (image) rendering modes.
+# Settings for the --imageText / --output (image) rendering modes, and for any
+# image printed directly (see "Printing an image").
 [image]
 # Print width in dots (80mm = 576, 58mm = 384). Must be a multiple of 8.
 width = 576
@@ -133,6 +138,9 @@ font_size = 28.0
 | `--text` | Print as plain ESC/POS text instead of the default image (loses icons and other non-ASCII glyphs). |
 | `--imageText` | Force image rendering (the default). Combine with `--stdout` to display the image inline in a kitty-compatible terminal. |
 | `-o, --output <FILE>` | Write the rendered image to a PNG file instead of printing. |
+| `--dither <auto\|on\|off>` | How a printed **image** is reduced to black and white (default `auto`). See [Printing an image](#printing-an-image). |
+| `--lighten <PERCENT>` | Lighten a printed **image** by this percentage before reducing it to black and white (default `0`). See [Printing an image](#printing-an-image). |
+| `[IMAGE]` | Print this image instead of the report. `-` reads it from stdin. See [Printing an image](#printing-an-image). |
 
 `--stdout` and `--raw` are mutually exclusive. `--output` cannot be combined
 with `--stdout` or `--raw`. `--stdout --imageText` is a valid combination (see
@@ -159,7 +167,82 @@ below).
   ```sh
   receipter --stdout --imageText
   ```
+
+  When stdout is **not** a terminal, the raw PNG bytes are written instead of
+  the escape codes, so the image can be piped or redirected:
+
+  ```sh
+  receipter --stdout --imageText > receipt.png
+  receipter --stdout --imageText | receipter   # render now, print it
+  ```
 - **`--raw`** — dumps the ESC/POS command bytes (e.g. pipe to `xxd`).
+
+## Printing an image
+
+Any image can be printed instead of the report, either as an argument or piped
+in on stdin:
+
+```sh
+receipter photo.jpg                  # from a file
+cat photo.jpg | receipter            # from a pipe
+receipter - < photo.jpg              # `-` is stdin, explicitly
+receipter photo.jpg -o preview.png   # preview exactly what would be printed
+```
+
+PNG, JPEG, GIF, BMP and WebP are accepted. The image is composited onto white
+(so transparency doesn't come out as solid black), scaled to the full print
+width from `[image].width` keeping its aspect ratio, and reduced to the pure
+black and white the printer can actually put on paper. In this mode no weather,
+calendar or transport lookups happen at all.
+
+How the reduction is done matters, so `--dither` controls it:
+
+- `auto` _(default)_ — dithers images with real mid-tones (photographs,
+  gradients) and thresholds ones that are already black and white (text, line
+  art, a receipt), which keeps each looking its best.
+- `on` — always dither (Floyd–Steinberg).
+- `off` — always threshold at mid-gray.
+
+### Too dark?
+
+Thermal dots bleed into each other, so they cover more paper than the image
+asked for and a dithered photo usually prints darker than it looks on screen.
+`--lighten <PERCENT>` blends the image toward paper white first, which scales
+the ink coverage down by the same percentage:
+
+```sh
+receipter photo.jpg --lighten 30   # lay down 30% fewer dots
+```
+
+Start around 20–40 and adjust to taste; `--output` renders exactly what would be
+printed, so you can compare without wasting paper. The right value depends on
+your printer and paper, so it's worth calibrating once.
+
+Lightening a **thresholded** image behaves differently, because thresholding has
+no half measures: artwork barely changes up to 50%, then drops out entirely once
+solid black lightens past mid-gray. If a receipt or logo vanishes, use
+`--dither on` to thin it smoothly instead. `receipter` warns rather than quietly
+feeding you a blank slip:
+
+```
+warning: nothing is left to print after --lighten 60; try a lower percentage, or
+--dither on to thin the artwork instead of dropping it
+```
+
+Because a receipt rendered by `--imageText` is already black and white at the
+print width, piping one back in reprints it dot for dot:
+
+```sh
+receipter --stdout --imageText | receipter
+```
+
+Stdin is only read when it has been redirected, so an interactive run is never
+left waiting for input, and a piped-but-empty stdin (`< /dev/null`, as in a cron
+job) just builds the usual report.
+
+The other output flags work here too: `--output` writes the prepared image to a
+PNG, `--stdout` displays it (or emits the PNG bytes when redirected), and
+`--raw` dumps the ESC/POS bytes.
 
 ## Dates and forecasts
 

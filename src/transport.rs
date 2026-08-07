@@ -15,7 +15,7 @@
 
 use std::collections::HashMap;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use chrono::{Local, NaiveDate, NaiveDateTime};
 use serde::Deserialize;
 
@@ -87,7 +87,7 @@ struct Stop {
 /// their next departures. `when` selects a scheduled timetable lookup for that
 /// date/time; `None` uses the live "now" board. Returns the section text (no
 /// heading/separator).
-pub fn nearby_departures(
+pub async fn nearby_departures(
     cfg: &TransportSettings,
     address: &str,
     when: Option<NaiveDateTime>,
@@ -95,7 +95,7 @@ pub fn nearby_departures(
     columns: usize,
     icons: bool,
 ) -> Result<String> {
-    let (stations, stops) = select_stops(cfg, address, cache)?;
+    let (stations, stops) = select_stops(cfg, address, cache).await?;
 
     if stations.is_empty() && stops.is_empty() {
         return Ok("No stations or bus stops configured or found nearby.\n".to_string());
@@ -104,7 +104,7 @@ pub fn nearby_departures(
     let mut out = String::new();
 
     for station in stations {
-        match fetch_train_departures(cfg, &station.id, when, cache) {
+        match fetch_train_departures(cfg, &station.id, when, cache).await {
             Ok((resolved, deps)) => {
                 if let Some(n) = &resolved {
                     remember_name(cache, &station.id, n);
@@ -132,7 +132,7 @@ pub fn nearby_departures(
     }
 
     for stop in stops {
-        match fetch_bus_departures(cfg, &stop.id, when, cache) {
+        match fetch_bus_departures(cfg, &stop.id, when, cache).await {
             Ok((resolved, deps)) => {
                 if let Some(n) = &resolved {
                     remember_name(cache, &stop.id, n);
@@ -179,7 +179,7 @@ fn stop_header(icons: bool, icon: char, label: &str, name: &str, columns: usize)
 
 /// Decide which stations and bus stops to report on: explicit codes when given,
 /// otherwise the nearest few from a proximity search.
-fn select_stops(
+async fn select_stops(
     cfg: &TransportSettings,
     address: &str,
     cache: Option<&Cache>,
@@ -189,7 +189,7 @@ fn select_stops(
 
     // Only geocode if a proximity search is needed for either mode.
     let loc = if train_nearest || bus_nearest {
-        Some(resolve_location(cfg, address, cache)?)
+        Some(resolve_location(cfg, address, cache).await?)
     } else {
         None
     };
@@ -204,7 +204,8 @@ fn select_stops(
             .collect()
     } else if let Some((lat, lon)) = loc {
         // Fetch a few extra and let `nearest` pick, in case ordering varies.
-        let places = fetch_places_of_type(cfg, lat, lon, "train_station", cfg.stations + 3, cache)?;
+        let places =
+            fetch_places_of_type(cfg, lat, lon, "train_station", cfg.stations + 3, cache).await?;
         nearest(&places, lat, lon, "train_station", cfg.stations)
             .into_iter()
             .filter_map(|p| {
@@ -227,7 +228,8 @@ fn select_stops(
             })
             .collect()
     } else if let Some((lat, lon)) = loc {
-        let places = fetch_places_of_type(cfg, lat, lon, "bus_stop", cfg.bus_stops + 3, cache)?;
+        let places =
+            fetch_places_of_type(cfg, lat, lon, "bus_stop", cfg.bus_stops + 3, cache).await?;
         nearest(&places, lat, lon, "bus_stop", cfg.bus_stops)
             .into_iter()
             .filter_map(|p| {
@@ -291,7 +293,7 @@ fn push_departures(out: &mut String, deps: &[Departure], limit: usize, columns: 
 
 // --- Location resolution ---------------------------------------------------
 
-fn resolve_location(
+async fn resolve_location(
     cfg: &TransportSettings,
     address: &str,
     cache: Option<&Cache>,
@@ -304,7 +306,7 @@ fn resolve_location(
         .clone()
         .or_else(|| postcode_from_address(address))
         .ok_or_else(|| anyhow!("no `postcode` set in [transport] and none found in the address"))?;
-    geocode_postcode(&postcode, cache)
+    geocode_postcode(&postcode, cache).await
 }
 
 /// Take the last comma-separated part of the address as the postcode.
@@ -328,14 +330,17 @@ struct PostcodeResult {
     longitude: f64,
 }
 
-fn geocode_postcode(postcode: &str, cache: Option<&Cache>) -> Result<(f64, f64)> {
+async fn geocode_postcode(postcode: &str, cache: Option<&Cache>) -> Result<(f64, f64)> {
     let cleaned: String = postcode.chars().filter(|c| !c.is_whitespace()).collect();
     let url = format!("{POSTCODES_URL}/{cleaned}");
     // postcodes.io is keyless, so there's no secret to redact and the mapping
     // never changes: treat it as a stable, indefinitely valid cache entry.
-    let body = cache::cached(cache, "geocode", &cleaned, None, true, || {
-        get(&url).with_context(|| format!("geocoding postcode `{postcode}`"))
-    })?;
+    let body = cache::cached(cache, "geocode", &cleaned, None, true, || async {
+        get(&url)
+            .await
+            .with_context(|| format!("geocoding postcode `{postcode}`"))
+    })
+    .await?;
     let data: PostcodeResponse =
         serde_json::from_str(&body).context("parsing postcodes.io response")?;
     let result = data
@@ -387,7 +392,7 @@ impl Place {
 /// at a time matters: the combined nearby search is capped (~10 results), and in
 /// a built-up area the closest results are all bus stops, which would crowd out
 /// the more widely-spaced train stations entirely.
-fn fetch_places_of_type(
+async fn fetch_places_of_type(
     cfg: &TransportSettings,
     lat: f64,
     lon: f64,
@@ -403,6 +408,7 @@ fn fetch_places_of_type(
     // in the key so near-identical lookups share an entry.
     let key = format!("{place_type}|{lat:.4}|{lon:.4}|{limit}");
     let body = cached_get(cache, "places", &key, None, true, url, &cfg.app_key)
+        .await
         .context("requesting nearby places from TransportAPI")?;
     let data: PlacesResponse =
         serde_json::from_str(&body).context("parsing TransportAPI places response")?;
@@ -439,10 +445,14 @@ fn cached_name(cache: Option<&Cache>, code: &str) -> Option<String> {
 
 /// List nearby train stations and bus stops with their codes and distances, to
 /// help populate `station_codes` (CRS) and `bus_stop_codes` (ATCO).
-pub fn list_stops(cfg: &TransportSettings, address: &str, cache: Option<&Cache>) -> Result<String> {
-    let (lat, lon) = resolve_location(cfg, address, cache)?;
-    let stations = fetch_places_of_type(cfg, lat, lon, "train_station", 10, cache)?;
-    let stops = fetch_places_of_type(cfg, lat, lon, "bus_stop", 10, cache)?;
+pub async fn list_stops(
+    cfg: &TransportSettings,
+    address: &str,
+    cache: Option<&Cache>,
+) -> Result<String> {
+    let (lat, lon) = resolve_location(cfg, address, cache).await?;
+    let stations = fetch_places_of_type(cfg, lat, lon, "train_station", 10, cache).await?;
+    let stops = fetch_places_of_type(cfg, lat, lon, "bus_stop", 10, cache).await?;
 
     let mut out = String::new();
     out.push_str("Nearest train stations  (station_codes = CRS)\n");
@@ -577,7 +587,7 @@ struct TrainDeparture {
     destination_name: Option<String>,
 }
 
-fn fetch_train_departures(
+async fn fetch_train_departures(
     cfg: &TransportSettings,
     code: &str,
     when: Option<NaiveDateTime>,
@@ -601,7 +611,7 @@ fn fetch_train_departures(
         None => (Some(Local::now().date_naive()), "live".to_string()),
     };
     let key = format!("{code}|{when_key}");
-    let body = cached_get(cache, "train", &key, for_date, false, url, &cfg.app_key)?;
+    let body = cached_get(cache, "train", &key, for_date, false, url, &cfg.app_key).await?;
     let data: TrainLive = serde_json::from_str(&body).context("parsing train board")?;
     let station_name = data.station_name.clone();
 
@@ -692,7 +702,7 @@ struct BusDeparture {
     best_departure_estimate: Option<String>,
 }
 
-fn fetch_bus_departures(
+async fn fetch_bus_departures(
     cfg: &TransportSettings,
     atco: &str,
     when: Option<NaiveDateTime>,
@@ -715,7 +725,7 @@ fn fetch_bus_departures(
         None => (Some(Local::now().date_naive()), "live".to_string()),
     };
     let key = format!("{atco}|{when_key}");
-    let body = cached_get(cache, "bus", &key, for_date, false, url, &cfg.app_key)?;
+    let body = cached_get(cache, "bus", &key, for_date, false, url, &cfg.app_key).await?;
     let data: BusLive = serde_json::from_str(&body).context("parsing bus board")?;
     let stop_name = data.stop_name.clone();
 
@@ -774,7 +784,7 @@ fn apply_time_window(deps: &mut Vec<Departure>, when: Option<NaiveDateTime>) {
 /// Fetch `url` through the cache, redacting the TransportAPI `app_key` from the
 /// stored body first. TransportAPI embeds the key in nested URLs
 /// (e.g. `service_timetable.id`), so it must never be persisted verbatim.
-fn cached_get(
+async fn cached_get(
     cache: Option<&Cache>,
     kind: &str,
     key: &str,
@@ -784,9 +794,10 @@ fn cached_get(
     app_key: &str,
 ) -> Result<String> {
     let app_key = app_key.to_string();
-    cache::cached(cache, kind, key, for_date, stable, move || {
-        get(&url).map(|body| redact(&body, &app_key))
+    cache::cached(cache, kind, key, for_date, stable, || async move {
+        get(&url).await.map(|body| redact(&body, &app_key))
     })
+    .await
 }
 
 /// Replace occurrences of the API key with a placeholder before storage.
@@ -800,16 +811,21 @@ fn redact(body: &str, app_key: &str) -> String {
 
 /// GET a URL as a String, pretending to be curl (some services vary output by
 /// User-Agent).
-fn get(url: &str) -> Result<String> {
+async fn get(url: &str) -> Result<String> {
     // Log the endpoint only (drop the query string, which carries the API key).
     log::debug!("GET {}", url.split('?').next().unwrap_or(url));
-    ureq::get(url)
+    let body = reqwest::Client::new()
+        .get(url)
         .header("User-Agent", "curl/8.0.0")
-        .call()
+        .send()
+        .await
         .with_context(|| format!("requesting `{url}`"))?
-        .body_mut()
-        .read_to_string()
-        .context("reading response body")
+        .error_for_status()
+        .with_context(|| format!("request to `{url}` failed"))?
+        .text()
+        .await
+        .context("reading response body")?;
+    Ok(body)
 }
 
 fn truncate(s: &str, max: usize) -> String {

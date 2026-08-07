@@ -4,6 +4,10 @@
 # Copy settings.example.toml to settings.toml and edit it.
 /settings.toml
 
+# Google service-account key files (private keys — never commit).
+google-service-account.json
+*service-account*.json
+
 # On-disk cache/history database for external API calls.
 /cache.sqlite
 *.sqlite

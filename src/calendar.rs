@@ -1,23 +1,39 @@
-//! Reads a Google Calendar "secret iCal" feed and extracts today's meetings.
+//! Reads calendars and extracts a given day's meetings.
 //!
-//! Google exposes each calendar as a private `.ics` URL (Calendar settings ->
-//! "Secret address in iCal format"). We fetch it over HTTPS, parse the events,
-//! expand recurring meetings, and keep the ones that occur today in the local
-//! timezone. No OAuth or API client is required.
+//! Two source types are supported:
+//!   * `ics` — a Google Calendar "secret iCal" feed (Calendar settings ->
+//!     "Secret address in iCal format"), fetched over HTTPS and parsed locally.
+//!   * `service_account` — the Google Calendar REST API authenticated with a
+//!     Google Cloud service account (share the calendar read-only with the
+//!     service account's email). Recurring events are expanded server-side.
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Local, NaiveDate, NaiveDateTime, TimeZone, Timelike};
 use ical::parser::ical::component::IcalEvent;
 use ical::property::Property;
+use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use rrule::RRuleSet;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::io::BufReader;
+use std::path::PathBuf;
 
 use crate::cache::{self, Cache};
 
-/// One calendar to read from, as configured in the settings file.
+/// One calendar to read from, as configured in the settings file. The TOML
+/// `type` field selects the variant (`type = "ics"` or
+/// `type = "service_account"`).
 #[derive(Debug, Clone, Deserialize)]
-pub struct CalendarSource {
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CalendarSource {
+    /// A Google Calendar "secret iCal" feed.
+    Ics(IcsSource),
+    /// The Google Calendar REST API via a service account.
+    ServiceAccount(ServiceAccountSource),
+}
+
+/// A secret-iCal calendar source.
+#[derive(Debug, Clone, Deserialize)]
+pub struct IcsSource {
     /// Optional label shown next to meetings from this calendar.
     #[serde(default)]
     pub name: Option<String>,
@@ -25,9 +41,24 @@ pub struct CalendarSource {
     pub ics_url: String,
 }
 
+/// A Google Calendar API source authenticated with a service account.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ServiceAccountSource {
+    /// Optional label shown next to meetings from this calendar.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Calendar to read, e.g. `you@gmail.com` or `primary`.
+    pub calendar_id: String,
+    /// Path to the Google service-account key JSON file.
+    pub key_file: PathBuf,
+}
+
 impl CalendarSource {
     fn label(&self) -> &str {
-        self.name.as_deref().unwrap_or(&self.ics_url)
+        match self {
+            CalendarSource::Ics(s) => s.name.as_deref().unwrap_or(&s.ics_url),
+            CalendarSource::ServiceAccount(s) => s.name.as_deref().unwrap_or(&s.calendar_id),
+        }
     }
 }
 
@@ -58,11 +89,11 @@ impl Meeting {
 }
 
 /// Read every configured calendar and return the meetings on `date`, sorted by
-/// start time. Each feed is fetched through `cache` (keyed per calendar and
+/// start time. Each source is fetched through `cache` (keyed per calendar and
 /// date), so repeat runs, past dates, and offline/rate-limited fetches are
 /// served from the cache. A failure reading one calendar is logged and skipped
 /// so the others (and the weather) still print.
-pub fn meetings_on(
+pub async fn meetings_on(
     sources: &[CalendarSource],
     date: NaiveDate,
     cache: Option<&Cache>,
@@ -70,7 +101,7 @@ pub fn meetings_on(
     let mut meetings = Vec::new();
 
     for source in sources {
-        match read_source(source, date, cache) {
+        match read_source(source, date, cache).await {
             Ok(mut found) => meetings.append(&mut found),
             Err(e) => eprintln!(
                 "warning: could not load calendar `{}`: {e:#}",
@@ -83,14 +114,33 @@ pub fn meetings_on(
     meetings
 }
 
-fn read_source(source: &CalendarSource, date: NaiveDate, cache: Option<&Cache>) -> Result<Vec<Meeting>> {
-    // Key by a hash of the secret iCal URL (so the token is never written to the
-    // cache DB) plus the date, mirroring the transport per-date history model.
-    let key = format!("{}|{}", url_hash(&source.ics_url), date.format("%Y%m%d"));
-    let ics = cache::cached(cache, "calendar", &key, Some(date), false, || {
-        fetch_ics(&source.ics_url)
-    })?;
-    parse_meetings(&ics, date, source.name.as_deref())
+async fn read_source(
+    source: &CalendarSource,
+    date: NaiveDate,
+    cache: Option<&Cache>,
+) -> Result<Vec<Meeting>> {
+    match source {
+        CalendarSource::Ics(s) => {
+            // Key by a hash of the secret iCal URL (so the token is never written
+            // to the cache DB) plus the date, mirroring the transport per-date
+            // history model.
+            let key = format!("{}|{}", url_hash(&s.ics_url), date.format("%Y%m%d"));
+            let ics = cache::cached(cache, "calendar", &key, Some(date), false, || {
+                fetch_ics(&s.ics_url)
+            })
+            .await?;
+            parse_meetings(&ics, date, s.name.as_deref())
+        }
+        CalendarSource::ServiceAccount(s) => {
+            // The calendar id is not a secret, so it can key the cache directly.
+            let key = format!("gcal|{}|{}", s.calendar_id, date.format("%Y%m%d"));
+            let json = cache::cached(cache, "calendar", &key, Some(date), false, || {
+                fetch_google_events(s, date)
+            })
+            .await?;
+            parse_google_events(&json, s.name.as_deref())
+        }
+    }
 }
 
 /// Stable, non-reversible identifier for a secret iCal URL, used as a cache key
@@ -102,15 +152,178 @@ fn url_hash(url: &str) -> String {
     format!("{:016x}", hasher.finish())
 }
 
-fn fetch_ics(url: &str) -> Result<String> {
-    let body = ureq::get(url)
+async fn fetch_ics(url: &str) -> Result<String> {
+    let body = reqwest::Client::new()
+        .get(url)
         .header("User-Agent", "receipter-calendar/1.0")
-        .call()
+        .send()
+        .await
         .with_context(|| format!("requesting calendar from `{url}`"))?
-        .body_mut()
-        .read_to_string()
+        .error_for_status()
+        .with_context(|| format!("calendar request to `{url}` failed"))?
+        .text()
+        .await
         .context("reading calendar response body")?;
     Ok(body)
+}
+
+// --- Google Calendar API (service account) ---------------------------------
+
+/// The fields we need from a Google service-account key JSON file.
+#[derive(Deserialize)]
+struct ServiceAccountKey {
+    client_email: String,
+    private_key: String,
+    token_uri: String,
+}
+
+/// JWT claims for the service-account -> access-token exchange.
+#[derive(Serialize)]
+struct JwtClaims<'a> {
+    iss: &'a str,
+    scope: &'a str,
+    aud: &'a str,
+    iat: i64,
+    exp: i64,
+}
+
+/// Google's OAuth token response (only the field we use).
+#[derive(Deserialize)]
+struct TokenResponse {
+    access_token: String,
+}
+
+/// Mint a short-lived read-only access token from a service-account key by
+/// signing and exchanging a JWT (the two-legged OAuth flow).
+async fn service_account_token(key: &ServiceAccountKey) -> Result<String> {
+    let now = chrono::Utc::now().timestamp();
+    let claims = JwtClaims {
+        iss: &key.client_email,
+        scope: "https://www.googleapis.com/auth/calendar.readonly",
+        aud: &key.token_uri,
+        iat: now,
+        exp: now + 3600,
+    };
+    let encoding = EncodingKey::from_rsa_pem(key.private_key.as_bytes())
+        .context("parsing service-account private key")?;
+    let jwt = jsonwebtoken::encode(&Header::new(Algorithm::RS256), &claims, &encoding)
+        .context("signing service-account JWT")?;
+
+    let resp: TokenResponse = reqwest::Client::new()
+        .post(&key.token_uri)
+        .form(&[
+            ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
+            ("assertion", jwt.as_str()),
+        ])
+        .send()
+        .await
+        .context("requesting Google access token")?
+        .error_for_status()
+        .context("Google token endpoint returned an error")?
+        .json()
+        .await
+        .context("parsing Google token response")?;
+    Ok(resp.access_token)
+}
+
+/// Fetch the raw `events.list` JSON for `date` from the Google Calendar API.
+async fn fetch_google_events(source: &ServiceAccountSource, date: NaiveDate) -> Result<String> {
+    let raw = std::fs::read_to_string(&source.key_file).with_context(|| {
+        format!(
+            "reading service-account key `{}`",
+            source.key_file.display()
+        )
+    })?;
+    let key: ServiceAccountKey =
+        serde_json::from_str(&raw).context("parsing service-account key JSON")?;
+    let token = service_account_token(&key).await?;
+
+    let time_min = local_midnight(date).to_rfc3339();
+    let time_max = local_midnight(date + Duration::days(1)).to_rfc3339();
+    // `@` must be percent-encoded in the path; other id characters are path-safe.
+    let cal = source.calendar_id.replace('@', "%40");
+    let url = format!("https://www.googleapis.com/calendar/v3/calendars/{cal}/events");
+
+    log::debug!("GET calendar/v3 events for `{}`", source.calendar_id);
+    let body = reqwest::Client::new()
+        .get(&url)
+        .bearer_auth(&token)
+        .query(&[
+            ("timeMin", time_min.as_str()),
+            ("timeMax", time_max.as_str()),
+            ("singleEvents", "true"),
+            ("orderBy", "startTime"),
+            ("maxResults", "50"),
+        ])
+        .send()
+        .await
+        .context("requesting Google Calendar events")?
+        .error_for_status()
+        .context("Google Calendar events request failed")?
+        .text()
+        .await
+        .context("reading Google Calendar events body")?;
+    Ok(body)
+}
+
+/// The `events.list` response shape (only the fields we use).
+#[derive(Deserialize)]
+struct GoogleEvents {
+    #[serde(default)]
+    items: Vec<GoogleEvent>,
+}
+
+#[derive(Deserialize)]
+struct GoogleEvent {
+    #[serde(default)]
+    summary: Option<String>,
+    start: Option<GoogleEventTime>,
+}
+
+#[derive(Deserialize)]
+struct GoogleEventTime {
+    /// RFC3339 timestamp for timed events, e.g. `2026-07-20T09:00:00+01:00`.
+    #[serde(rename = "dateTime", default)]
+    date_time: Option<String>,
+    /// `YYYY-MM-DD` for all-day events.
+    #[serde(default)]
+    date: Option<String>,
+}
+
+/// Parse a Google `events.list` JSON payload into meetings. Google already
+/// filtered to the requested day and expanded recurring events server-side.
+fn parse_google_events(json: &str, calendar_name: Option<&str>) -> Result<Vec<Meeting>> {
+    let data: GoogleEvents =
+        serde_json::from_str(json).context("parsing Google Calendar events JSON")?;
+    let calendar = calendar_name.map(str::to_string);
+
+    let mut meetings = Vec::new();
+    for event in data.items {
+        let summary = event.summary.unwrap_or_else(|| "(no title)".to_string());
+        let Some(start) = event.start else { continue };
+        if let Some(dt) = start.date_time.as_deref() {
+            if let Ok(parsed) = DateTime::parse_from_rfc3339(dt) {
+                meetings.push(Meeting {
+                    start: parsed.with_timezone(&Local),
+                    all_day: false,
+                    summary,
+                    calendar: calendar.clone(),
+                });
+            }
+        } else if let Some(d) = start.date.as_deref() {
+            if let Ok(date) = NaiveDate::parse_from_str(d, "%Y-%m-%d") {
+                meetings.push(Meeting {
+                    start: local_midnight(date),
+                    all_day: true,
+                    summary,
+                    calendar: calendar.clone(),
+                });
+            }
+        }
+    }
+
+    meetings.sort_by_key(|m| m.start);
+    Ok(meetings)
 }
 
 /// Parse an ICS document and return the meetings that fall on `date` (local time).
@@ -344,9 +557,89 @@ mod tests {
         assert_eq!(meetings.len(), 2);
 
         // The calendar name is carried through and shown on the line.
-        assert!(meetings
-            .iter()
-            .all(|m| m.calendar.as_deref() == Some("Work")));
+        assert!(
+            meetings
+                .iter()
+                .all(|m| m.calendar.as_deref() == Some("Work"))
+        );
         assert!(meetings.iter().any(|m| m.line().contains("(Work)")));
+    }
+
+    #[test]
+    fn parses_tagged_calendar_sources() {
+        #[derive(Deserialize)]
+        struct Wrapper {
+            calendars: Vec<CalendarSource>,
+        }
+
+        let toml = r#"
+            [[calendars]]
+            type = "ics"
+            name = "Work"
+            ics_url = "https://example.com/basic.ics"
+
+            [[calendars]]
+            type = "service_account"
+            calendar_id = "you@gmail.com"
+            key_file = "key.json"
+        "#;
+
+        let w: Wrapper = toml::from_str(toml).unwrap();
+        assert_eq!(w.calendars.len(), 2);
+        match &w.calendars[0] {
+            CalendarSource::Ics(s) => {
+                assert_eq!(s.name.as_deref(), Some("Work"));
+                assert_eq!(s.ics_url, "https://example.com/basic.ics");
+            }
+            _ => panic!("first source should be an ics feed"),
+        }
+        match &w.calendars[1] {
+            CalendarSource::ServiceAccount(s) => {
+                assert_eq!(s.name, None);
+                assert_eq!(s.calendar_id, "you@gmail.com");
+                assert_eq!(s.key_file, std::path::PathBuf::from("key.json"));
+            }
+            _ => panic!("second source should be a service account"),
+        }
+    }
+
+    #[test]
+    fn parses_google_events_timed_and_all_day() {
+        let json = r#"{
+            "items": [
+                {
+                    "summary": "Standup",
+                    "start": { "dateTime": "2026-07-20T09:30:00+01:00" }
+                },
+                {
+                    "summary": "Holiday",
+                    "start": { "date": "2026-07-20" }
+                },
+                {
+                    "start": { "dateTime": "2026-07-20T14:00:00+01:00" }
+                }
+            ]
+        }"#;
+
+        let meetings = parse_google_events(json, Some("Work")).unwrap();
+        assert_eq!(meetings.len(), 3);
+
+        // Sorted by start; the all-day event sorts to local midnight, so it
+        // comes before the timed events.
+        assert_eq!(meetings[0].summary, "Holiday");
+        assert!(meetings[0].all_day);
+        // The 09:30 timed event is kept and not marked all-day.
+        assert!(
+            meetings
+                .iter()
+                .any(|m| m.summary == "Standup" && !m.all_day)
+        );
+        // A missing summary falls back to a placeholder.
+        assert!(meetings.iter().any(|m| m.summary == "(no title)"));
+        assert!(
+            meetings
+                .iter()
+                .all(|m| m.calendar.as_deref() == Some("Work"))
+        );
     }
 }
