@@ -370,7 +370,7 @@ Bin day tomorrow
   service's next collection:
 
   ```
-  11 Example Close, Townsville, AB1 2CD (property_id = 3657977)
+  11 Example Close, Townsville, AB1 2CD (property_id = 3678999)
 
   2026-08-13  Thu  Food Waste
   2026-08-13  Thu  Mixed Recycling (Cans, Plastics & Glass)
