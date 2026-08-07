@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ab_glyph::{Font, FontVec, PxScale, ScaleFont};
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use chrono::{Local, NaiveDate, NaiveTime};
 use clap::{ArgGroup, Parser};
 use escpos::driver::{ConsoleDriver, Driver, NetworkDriver};
@@ -17,6 +17,7 @@ use serde::Deserialize;
 
 mod calendar;
 use calendar::Meeting;
+mod bins;
 mod cache;
 mod transport;
 
@@ -64,6 +65,16 @@ struct Cli {
     /// `station_codes` / `bus_stop_codes`), then exit.
     #[arg(long)]
     list_stops: bool,
+
+    /// Always include the Bin day section, showing the next collection even when
+    /// it isn't the eve of one (which is when it normally appears).
+    #[arg(long)]
+    bins: bool,
+
+    /// List every bin collection for the configured property, with the council's
+    /// property id (to fill in `property_id`), then exit.
+    #[arg(long)]
+    list_bins: bool,
 
     /// Ignore cached freshness and refetch live data (still stored to the cache).
     #[arg(long)]
@@ -142,6 +153,10 @@ struct Settings {
     /// stops with their next departures are printed below the meetings.
     #[serde(default)]
     transport: Option<transport::TransportSettings>,
+    /// Optional council bin-collection config. When set, the bins going out are
+    /// printed on the eve of a collection (and on no other day).
+    #[serde(default)]
+    bins: Option<bins::BinSettings>,
     #[serde(default)]
     cache: CacheSettings,
     #[serde(default)]
@@ -249,6 +264,18 @@ async fn main() -> Result<()> {
     }
 
     let today = Local::now().date_naive();
+
+    // Utility mode: print every collection for the configured property, then exit.
+    if cli.list_bins {
+        match &settings.bins {
+            Some(cfg) => {
+                print!("{}", bins::list_bins(cfg, &address, today, cache).await?);
+                return Ok(());
+            }
+            None => bail!("--list-bins needs a [bins] section with a `council`"),
+        }
+    }
+
     let target_date = if cli.tomorrow {
         today + chrono::Days::new(1)
     } else {
@@ -321,6 +348,64 @@ async fn main() -> Result<()> {
             }
         }
         _ => report,
+    };
+
+    // Append the bins going out. Normally this only appears on the eve of a
+    // collection (see `bins::bin_day`) — on every other day there is no heading
+    // either — but `--bins` forces the next collection to be shown whenever it
+    // is. The council page reports what is *next*, so it can only speak to today
+    // and later; past dates are left alone. A bin lookup failure shouldn't stop
+    // the rest from printing.
+    let report = match &settings.bins {
+        Some(cfg) if target_date >= today => {
+            log::debug!("checking bin collections ({} council)", cfg.council);
+            let found = bins::bin_day(
+                cfg,
+                &address,
+                target_date,
+                today,
+                cache,
+                bins::Layout { columns, icons },
+                cli.bins,
+            )
+            .await;
+            match found {
+                // Title the section by the collection's own date rather than the
+                // configured notice period, so `--bins` stays honest about how
+                // far off it is.
+                Ok(Some((due, body))) => {
+                    let heading = match (due - target_date).num_days() {
+                        0 => "Bin day today".to_string(),
+                        1 => "Bin day tomorrow".to_string(),
+                        n => format!("Bin day in {n} days"),
+                    };
+                    append_section(&report, &heading, &body)
+                }
+                Ok(None) => {
+                    if cli.bins {
+                        eprintln!(
+                            "warning: --bins: no upcoming collections found for this property"
+                        );
+                    }
+                    report
+                }
+                Err(e) => {
+                    eprintln!("warning: could not load bin days: {e:#}");
+                    report
+                }
+            }
+        }
+        _ => {
+            if cli.bins {
+                let why = if settings.bins.is_none() {
+                    "no [bins] section in the settings file"
+                } else {
+                    "bin collections are only known for today and future dates"
+                };
+                eprintln!("warning: --bins ignored: {why}");
+            }
+            report
+        }
     };
 
     if let Some(path) = cli.output.as_deref() {
@@ -984,14 +1069,18 @@ fn monospace_advance(cfg: &ImageSettings) -> Option<f32> {
     (w > 0).then(|| w as f32 / 10.0)
 }
 
-/// Whether the configured font actually contains the train and bus icon glyphs.
-/// When it doesn't, the Transport section uses `(train)`/`(bus)` labels instead
-/// so nothing prints as a "tofu" box.
+/// Whether the configured font actually contains the icon glyphs used by the
+/// Transport and Bin day sections. When it doesn't, those sections fall back to
+/// `(train)`/`(bus)` labels and a bare date, so nothing prints as a "tofu" box.
 fn font_has_icons(cfg: &ImageSettings) -> bool {
     fs::read(&cfg.font)
         .ok()
         .and_then(|b| FontVec::try_from_vec(b).ok())
-        .map(|f| f.glyph_id(transport::TRAIN_ICON).0 != 0 && f.glyph_id(transport::BUS_ICON).0 != 0)
+        .map(|f| {
+            f.glyph_id(transport::TRAIN_ICON).0 != 0
+                && f.glyph_id(transport::BUS_ICON).0 != 0
+                && f.glyph_id(bins::BIN_ICON).0 != 0
+        })
         .unwrap_or(false)
 }
 
@@ -1213,11 +1302,7 @@ fn with_font_fallback(font: &FontVec, text: &str) -> String {
                 '\u{2015}' => '\u{2500}', // horizontal bar -> box-drawing horizontal
                 _ => '?',
             };
-            if font.glyph_id(alt).0 != 0 {
-                alt
-            } else {
-                '?'
-            }
+            if font.glyph_id(alt).0 != 0 { alt } else { '?' }
         })
         .collect()
 }
