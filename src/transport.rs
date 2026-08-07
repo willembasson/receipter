@@ -309,8 +309,9 @@ async fn resolve_location(
     geocode_postcode(&postcode, cache).await
 }
 
-/// Take the last comma-separated part of the address as the postcode.
-fn postcode_from_address(address: &str) -> Option<String> {
+/// Take the last comma-separated part of the address as the postcode. Shared
+/// with the bins lookup, which needs the same thing from the same setting.
+pub fn postcode_from_address(address: &str) -> Option<String> {
     let last = address.rsplit(',').next()?.trim();
     if last.is_empty() {
         None

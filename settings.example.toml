@@ -64,12 +64,29 @@ departures = 3           # departures listed per stop (default 3; 0 disables tra
 # bus_stop_codes = ["490000000A"]
 # routes = ["12"]   # only show these bus routes/lines (all if empty)
 
+# Optional: bin collection days. When set, the receipt gains a "Bin day" section
+# on the eve of a collection — and on no other day, since a standing "next
+# collection is in five days" note is just noise.
+#
+# `council` picks the scraper. Councils publish this data in wildly different
+# ways, so each is a separate implementation; "Bromley" and "Hackney" are
+# supported and anything else is an error. The property is found from the
+# postcode and the house-and-street part of `address`, so usually no other keys
+# are needed — run `receipter --list-bins` to check the match and see every
+# collection date.
+[bins]
+council = "Bromley"
+# postcode = "AB1 2CD"          # optional; defaults to the postcode in `address`
+# property = "11 Example Street" # optional; defaults to `address`
+# property_id = "3678999"       # optional; skips the address lookup entirely
+# lead_days = 1                 # days of notice (default 1, i.e. the day before)
+
 # Optional: on-disk cache/history for every external call (weather, geocoding,
-# and transport). Identical requests within `ttl_minutes` are served from the
-# database instead of the network, and every dated result is kept so a later run
-# for a now-past date still works. TransportAPI keys are redacted before any
-# response is stored. Delete the file to clear it. Bypass with `--no-cache` or
-# force a live refetch with `--refresh`.
+# transport, and bin days). Identical requests within `ttl_minutes` are served
+# from the database instead of the network, and every dated result is kept so a
+# later run for a now-past date still works. TransportAPI keys are redacted
+# before any response is stored. Delete the file to clear it. Bypass with
+# `--no-cache` or force a live refetch with `--refresh`.
 [cache]
 path = "cache.sqlite"   # SQLite database file (default "cache.sqlite")
 ttl_minutes = 30        # how long a live result stays fresh (default 30)

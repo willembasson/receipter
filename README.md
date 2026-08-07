@@ -10,9 +10,12 @@ network thermal printer. Each receipt has three parts:
    "secret iCal" feeds.
 4. **Transport** _(optional)_ — the nearest train stations and bus stops with
    their next departures, from [TransportAPI](https://developer.transportapi.com).
+5. **Bin day** _(optional)_ — which bins to put out, shown only on the eve of a
+   collection, from your council's collection-day service (Bromley or Hackney).
 
-Every external call (weather, geocoding, and transport) is cached in a local
-SQLite database, which doubles as a history so past dates can be reprinted.
+Every external call (weather, geocoding, transport, and bin days) is cached in a
+local SQLite database, which doubles as a history so past dates can be
+reprinted.
 
 It can print directly to the printer, or preview the output to your terminal or
 a PNG file. It can also print an image you give it instead of the report.
@@ -99,10 +102,23 @@ departures = 3           # departures per stop (default 3)
 # bus_stop_codes = ["490000000A"]
 # routes = ["12"]   # only show these bus routes/lines (all if empty)
 
+# Optional bin collection days. When set, the receipt gains a "Bin day" section
+# on the eve of a collection (and on no other day). `council` selects the
+# scraper; "Bromley" and "Hackney" are implemented. The property is found from
+# the postcode and house/street in `address` — run `receipter --list-bins` to
+# check the match. See "Bin days" below.
+[bins]
+council = "Bromley"
+# postcode = "AB1 2CD"        # optional; defaults to the postcode in `address`
+# property = "11 Example St"  # optional; defaults to `address`
+# property_id = "3678999"     # optional; skips the address lookup entirely
+# lead_days = 1               # days of notice (default 1, i.e. the day before)
+
 # Optional on-disk cache/history for every external call (weather, geocoding,
-# transport). Identical requests within `ttl_minutes` are served from the
-# database instead of the network, and every dated result is kept so a later run
-# for a now-past date still works. TransportAPI keys are redacted before storage.
+# transport, bin days). Identical requests within `ttl_minutes` are served from
+# the database instead of the network, and every dated result is kept so a later
+# run for a now-past date still works. TransportAPI keys are redacted before
+# storage.
 [cache]
 path = "cache.sqlite"    # SQLite database file (default "cache.sqlite")
 ttl_minutes = 30         # how long a live result stays fresh (default 30)
@@ -131,6 +147,8 @@ font_size = 28.0
 | `-t, --tomorrow` | Shorthand for tomorrow's date (conflicts with `--date`). |
 | `--at <HHMM>` | Look up transport departures at this time (scheduled timetable) instead of now. Enables the Transport section for any `--date`. |
 | `--list-stops` | Print nearby stations and bus stops with their codes (to fill in `station_codes` / `bus_stop_codes`), then exit. |
+| `--bins` | Always include the Bin day section, showing the next collection even when it isn't the eve of one. See [Bin days](#bin-days). |
+| `--list-bins` | Print every bin collection for the configured property, with the council's property id (to fill in `property_id`), then exit. |
 | `--refresh` | Ignore cache freshness and refetch live data (the result is still stored). Historic past-date lookups are unaffected. |
 | `--no-cache` | Disable the SQLite cache entirely for this run (no reads or writes). |
 | `--stdout` | Print the report text to stdout instead of the printer. |
@@ -306,17 +324,151 @@ with their next departures:
   in `--text` mode a `(train)` / `(bus)` label is used instead. Stop names are
   shortened to fit the configured print width (`[image].width`).
 
+## Bin days
+
+When a `[bins]` block is present, the receipt gains a **Bin day** section — but
+only on the eve of a collection. On every other day nothing is printed at all,
+not even a heading, because a standing "your next collection is in five days"
+note is noise; the reminder is only useful the evening before.
+
+```
+----------------------------------------
+Bin day tomorrow
+
+  Thursday, 13 August
+
+    Food Waste
+    Mixed Recycling (Cans, Plastics & Glass)
+```
+
+- `council` selects which scraper to use. Councils publish this data in wildly
+  different ways, so each one is a separate implementation. **`"Bromley"` and
+  `"Hackney"` are implemented**; any other value is a clear error rather than a
+  silent no-op. The name is matched loosely, so `"Hackney"`, `"hackney"`,
+  `"Hackney Council"` and `"London Borough of Hackney"` are all the same
+  council.
+- The property is found from the **postcode** and the **house-and-street** part
+  of your `address`, so the top-level setting is usually all the config you
+  need. Override either with `postcode` / `property`.
+- `lead_days` (default `1`) is how much notice you want. `1` means the section
+  appears the day before; `0` would make it appear on the morning of collection
+  day, which is generally too late to be useful.
+- **`--bins` forces the section on**, showing the next collection from the
+  target date onwards even when it isn't the eve of one. Useful for checking the
+  section renders without waiting for a collection to come round, or as a
+  standing "what's next" if you always want it. The heading reflects the real
+  distance, so it stays honest:
+
+  ```sh
+  receipter --stdout            # nothing, unless a collection is tomorrow
+  receipter --stdout --bins     # "Bin day in 6 days" / "Bin day tomorrow"
+  ```
+
+  If it can't show anything (no `[bins]` block, or a past `--date`), it says so
+  on stderr rather than silently doing nothing.
+- Run **`receipter --list-bins`** to check the address matched and see every
+  service's next collection:
+
+  ```
+  11 Example Close, Townsville, AB1 2CD (property_id = 3678999)
+
+  2026-08-13  Thu  Food Waste
+  2026-08-13  Thu  Mixed Recycling (Cans, Plastics & Glass)
+  2026-08-18  Tue  Garden Waste
+  2026-08-20  Thu  Non-Recyclable Refuse
+  2026-08-20  Thu  Paper & Cardboard
+  ```
+
+  If the match is ambiguous or wrong, paste the id into `property_id` to skip
+  the address lookup entirely.
+- On-demand services (bulky waste collections, battery/textile requests) have no
+  scheduled next collection, so they never appear.
+- The council reports what is *next*, so the section is only produced for today
+  and future dates; `--date` for a past day leaves it out. `--tomorrow` shifts
+  the whole receipt, so it shows the collection two days out — whatever
+  tomorrow's receipt would say.
+- If the lookup fails, a warning is printed and the rest of the receipt still
+  prints.
+- In the default image output the date is prefixed with a bin icon; in `--text`
+  mode the date stands alone. Service names are shortened to fit the configured
+  print width (`[image].width`).
+
+### How the councils are implemented
+
+Each council lives in its own module under `src/bins/`, implementing a single
+function that turns the configured address into `(service name, collection
+date)` pairs. The day-before gate, formatting, address matching and caching are
+shared. The two supported councils could hardly be less alike, which is rather
+the point of the split:
+
+**Bromley** — HTML scraping. The council page people are pointed at
+(`bromley.gov.uk/household-waste-recycling/bin-collection-days`) is only a
+signpost; the real service is FixMyStreet **WasteWorks** at
+`recyclingservices.bromley.gov.uk`. Two requests get us there:
+
+1. `POST /waste` with the postcode returns a `<select>` listing every property
+   at that postcode. (It must be a POST — the same query over GET returns the
+   empty form.) This mapping never changes, so it is cached indefinitely.
+2. `GET /waste/<id>` returns the collections *eventually*. The first response is
+   an interstitial reading "Loading your bin days..." while the backend fetches
+   from the council's system; re-requesting the same URL a few seconds later
+   returns the real page. `receipter` polls for it (up to 15 attempts, 2s apart;
+   in practice it resolves on the third or fourth, ~6s). Only a fully loaded
+   page is ever cached. Note that WasteWorks serves a 503 to obviously-automated
+   clients, so this module (unlike the rest of the crate) presents a normal
+   desktop browser User-Agent.
+
+Bromley reports only the *next* collection per service, so that is all there is
+to know.
+
+**Hackney** — a JSON API, no scraping. The council page embeds a Nuxt
+single-page app which talks to an unauthenticated API; its base URL and tenant
+id are baked into the page and reproduced as constants. Getting from a postcode
+to a set of dates takes four hops: `property/opensearch` →
+`alloywastepages/getproperty` (which yields a list of *bin* ids) →
+`alloywastepages/getbin` → `alloywastepages/getcollection` and
+`alloywastepages/getworkflow`. That is a dozen or so requests for one property,
+which is why each response is cached individually — a repeat run makes none at
+all, and bins sharing a collection round share a cached workflow.
+
+Two Hackney quirks worth knowing:
+
+- **Labels are containers, not services.** Hackney names a collection by the bin
+  it comes in ("Recycling Sack", "Wheeled Bin (180ltr)", "1 x ES_Food 240
+  litres") rather than by service. The only other hint in the API is a bin-type
+  id that maps to an icon image, and several of those are ambiguous, so rather
+  than guess a service name and risk mislabelling a bin this uses the council's
+  own wording — the same text you see on Hackney's own page. (The internal
+  `ES_` estate-services marker is stripped, as it means nothing to a resident.)
+- **Disabled and non-live containers are skipped**, matching what the council's
+  own front end shows.
+
+Unlike Bromley, Hackney publishes a full rolling schedule reaching about a year
+out, so a run of upcoming dates is kept per container. That is what lets the
+day-before gate stay correct for a future `--date` instead of only ever knowing
+the next collection from today.
+
+> **Adding another council.** Implement the same one function in a new module
+> under `src/bins/` and add it to the dispatch in `src/bins/mod.rs`. If you need
+> broad multi-council support rather than hand-rolled ones,
+> [UKBinCollectionData][ukbcd] already covers 150+ UK councils — at some point
+> this may be replaced by, or grow into, a port of what it does. For now it
+> deliberately implements a couple of councils well.
+
+[ukbcd]: https://github.com/robbrad/UKBinCollectionData
+
 ## Caching and history
 
-Every external call — weather (wttr.in), postcode geocoding (postcodes.io), and
-transport (TransportAPI) — is recorded in a local SQLite database (`cache.sqlite`
-by default; set `path` under `[cache]`). Each row stores the call's kind, the
-parameters (including the target date), the time it was made, and the response.
-This gives you three things:
+Every external call — weather (wttr.in), postcode geocoding (postcodes.io),
+transport (TransportAPI), and bin days (your council) — is recorded in a local
+SQLite database (`cache.sqlite` by default; set `path` under `[cache]`). Each row
+stores the call's kind, the parameters (including the target date), the time it
+was made, and the response. This gives you three things:
 
 - **Cache** — an identical request made within `ttl_minutes` (default 30) is
   served from the database instead of the network, which conserves the
-  TransportAPI free-tier quota. Location lookups (geocoding and nearby stops)
+  TransportAPI free-tier quota and keeps the bin-day polling to once a day.
+  Location lookups (geocoding, nearby stops, and a postcode's address list)
   never move, so they're cached indefinitely.
 - **History** — because each dated result is filed under its date, a request for
   a now-past date returns the stored copy even though wttr.in and the live
@@ -349,6 +501,10 @@ Control caching with:
   tables wider than the 576-dot print area and may clip.
 - Transport departures need a free TransportAPI key. Live boards are today-only;
   use `--at HHMM` for a scheduled-timetable lookup on any date.
+- Bin days are read from whatever the council publishes — HTML for Bromley, an
+  undocumented JSON API for Hackney — so a site or API change will break them.
+  Failures warn and skip the section rather than stopping the receipt. Only
+  Bromley and Hackney are implemented.
 - The cache database grows over time (one row per external call). It's safe to
   delete `cache.sqlite` at any point; you'll only lose the reprint history.
 
@@ -356,7 +512,7 @@ Control caching with:
 
 ```sh
 cargo build      # always rebuild before running the binary
-cargo test       # unit tests (weather image, calendar + transport parsing)
+cargo test       # unit tests (weather image, calendar + transport + bin parsing)
 ```
 
 To test calendars without exposing a real feed, serve a fixture `.ics` over
