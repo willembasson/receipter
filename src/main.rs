@@ -11,6 +11,7 @@ mod calendar;
 mod cli;
 mod render;
 mod settings;
+mod template;
 mod transport;
 mod weather;
 
@@ -24,10 +25,20 @@ async fn main() -> Result<()> {
     init_logging(cli.verbose);
 
     let settings = load_settings(&cli.config)?;
+    let tpl = template::load(&cli.template)?;
 
-    let location = cli.location.clone().unwrap_or(settings.location);
-    let endpoint = cli.endpoint.clone().unwrap_or(settings.endpoint);
-    let address = settings.address;
+    let location = cli
+        .location
+        .clone()
+        .or_else(|| tpl.overrides.location.clone())
+        .unwrap_or_else(|| settings.location.clone());
+    let endpoint = cli
+        .endpoint
+        .clone()
+        .or_else(|| tpl.overrides.endpoint.clone())
+        .unwrap_or_else(|| settings.endpoint.clone());
+    let days = tpl.overrides.days.unwrap_or(cli.days);
+    let address = settings.address.clone();
     log::debug!("loaded settings from `{}`", cli.config.display());
 
     if let Some(bytes) = render::read_input_image(cli.image.as_deref())? {
@@ -105,10 +116,14 @@ async fn main() -> Result<()> {
         location
     );
 
-    let report = weather::weather_report(cache, &location, cli.days, target_date, today).await?;
+    let when = cli.at.map(|t| target_date.and_time(t));
+    let columns = render::body_columns(&settings.image);
+    let icons = !cli.stdout && !cli.raw && !cli.text && render::font_has_icons(&settings.image);
 
-    let report = if settings.calendars.is_empty() {
-        report
+    let weather_text = weather::weather_report(cache, &location, days, target_date, today).await?;
+
+    let calendars_text = if settings.calendars.is_empty() {
+        None
     } else {
         log::debug!(
             "loading meetings from {} calendar(s)",
@@ -119,17 +134,11 @@ async fn main() -> Result<()> {
             1 => "Tomorrow's meetings",
             _ => "Meetings",
         };
-        append_meetings(
-            &report,
-            heading,
-            &calendar::meetings_on(&settings.calendars, target_date, cache).await,
-        )
+        let meetings = calendar::meetings_on(&settings.calendars, target_date, cache).await;
+        Some(format_meetings(heading, &meetings))
     };
 
-    let when = cli.at.map(|t| target_date.and_time(t));
-    let columns = render::body_columns(&settings.image);
-    let icons = !cli.stdout && !cli.raw && !cli.text && render::font_has_icons(&settings.image);
-    let report = match &settings.transport {
+    let transport_text = match &settings.transport {
         Some(cfg) if cfg.departures > 0 && (is_today || when.is_some()) => {
             log::debug!(
                 "loading transport departures ({})",
@@ -142,18 +151,18 @@ async fn main() -> Result<()> {
                         Some(t) => format!("Transport from {}", t.format("%H:%M")),
                         None => "Transport".to_string(),
                     };
-                    append_section(&report, &heading, &body)
+                    Some(format!("{heading}\n\n{}", body.trim_end()))
                 }
                 Err(e) => {
                     eprintln!("warning: could not load transport info: {e:#}");
-                    report
+                    None
                 }
             }
         }
-        _ => report,
+        _ => None,
     };
 
-    let report = match &settings.bins {
+    let bins_text = match &settings.bins {
         Some(cfg) if target_date >= today => {
             log::debug!("checking bin collections ({} council)", cfg.council);
             let found = bins::bin_day(
@@ -173,7 +182,7 @@ async fn main() -> Result<()> {
                         1 => "Bin day tomorrow".to_string(),
                         n => format!("Bin day in {n} days"),
                     };
-                    append_section(&report, &heading, &body)
+                    Some(format!("{heading}\n\n{}", body.trim_end()))
                 }
                 Ok(None) => {
                     if cli.bins {
@@ -181,11 +190,11 @@ async fn main() -> Result<()> {
                             "warning: --bins: no upcoming collections found for this property"
                         );
                     }
-                    report
+                    None
                 }
                 Err(e) => {
                     eprintln!("warning: could not load bin days: {e:#}");
-                    report
+                    None
                 }
             }
         }
@@ -198,38 +207,62 @@ async fn main() -> Result<()> {
                 };
                 eprintln!("warning: --bins ignored: {why}");
             }
-            report
+            None
         }
     };
 
+    let mut segments = template::assemble(&tpl.elements, &|name| match name {
+        "address" => Some(address.clone()),
+        "date" => Some(date.clone()),
+        "weather" => Some(weather_text.clone()),
+        "calendars" => calendars_text.clone(),
+        "transport" => transport_text.clone(),
+        "bins" => bins_text.clone(),
+        other => {
+            eprintln!("warning: unknown template block `{{{{{other}}}}}`");
+            None
+        }
+    });
+
+    render::resolve_images(&mut segments).await?;
+
+    output_report(&cli, &endpoint, &segments, &settings.image)?;
+
+    Ok(())
+}
+
+fn output_report(
+    cli: &Cli,
+    endpoint: &str,
+    segments: &[template::Segment],
+    image_cfg: &settings::ImageSettings,
+) -> Result<()> {
     if let Some(path) = cli.output.as_deref() {
         log::debug!("output: writing PNG preview to `{}`", path.display());
-        let png = render::build_report_png(&address, &date, &report, &settings.image)?;
+        let png = render::build_report_png(segments, image_cfg, cli.dither, cli.lighten)?;
         fs::write(path, &png).with_context(|| format!("writing image to `{}`", path.display()))?;
         println!("Wrote weather image to {}", path.display());
     } else if cli.stdout {
         if cli.image_text {
             log::debug!("output: inline image to stdout");
-            let png = render::build_report_png(&address, &date, &report, &settings.image)?;
+            let png = render::build_report_png(segments, image_cfg, cli.dither, cli.lighten)?;
             render::emit_image_to_stdout(&png)?;
         } else {
             log::debug!("output: report text to stdout");
-            print!("{report}");
+            print!("{}", template::segments_to_text(segments));
         }
     } else if cli.raw {
         log::debug!("output: raw ESC/POS byte stream to stdout");
-        render::render(ConsoleDriver::open(true), &address, &date, &report)?;
+        let text = template::segments_to_text(segments);
+        render::render(ConsoleDriver::open(true), &text)?;
     } else if cli.text {
         log::debug!("output: plain-text ESC/POS to printer `{endpoint}`");
-        render::print_report(&endpoint, &address, &date, &report)?;
-    } else if cli.image_text {
-        log::debug!("output: image to printer `{endpoint}`");
-        render::print_image(&endpoint, &address, &date, &report, &settings.image)?;
+        let text = template::segments_to_text(segments);
+        render::print_report(endpoint, &text)?;
     } else {
         log::debug!("output: image to printer `{endpoint}`");
-        render::print_image(&endpoint, &address, &date, &report, &settings.image)?;
+        render::print_image(endpoint, segments, image_cfg, cli.dither, cli.lighten)?;
     }
-
     Ok(())
 }
 
@@ -245,17 +278,7 @@ fn init_logging(verbose: u8) {
         .init();
 }
 
-fn append_section(report: &str, heading: &str, body: &str) -> String {
-    let mut out = report.trim_end().to_string();
-    out.push_str("\n\n----------------------------------------\n");
-    out.push_str(heading);
-    out.push_str("\n\n");
-    out.push_str(body.trim_end());
-    out.push('\n');
-    out
-}
-
-fn append_meetings(report: &str, heading: &str, meetings: &[Meeting]) -> String {
+fn format_meetings(heading: &str, meetings: &[Meeting]) -> String {
     let body = if meetings.is_empty() {
         "No meetings.".to_string()
     } else {
@@ -265,5 +288,5 @@ fn append_meetings(report: &str, heading: &str, meetings: &[Meeting]) -> String 
             .collect::<Vec<_>>()
             .join("\n")
     };
-    append_section(report, heading, &body)
+    format!("{heading}\n\n{body}")
 }

@@ -14,6 +14,7 @@ use imageproc::drawing::{draw_text_mut, text_size};
 
 use crate::cli::Dither;
 use crate::settings::ImageSettings;
+use crate::template::Segment;
 use crate::{bins, transport};
 
 /// Vertical line spacing (in dots) used for the printed receipt.
@@ -25,31 +26,62 @@ const ICON_SCALE: f32 = 1.5;
 /// The share of mid-tone pixels above which [`Dither::Auto`] dithers.
 const MIDTONE_RATIO: f64 = 0.20;
 
+/// Resolve image paths/URLs in segments to their actual bytes.
+/// Segments that are `Image` at this point contain the path as bytes (from the template parser);
+/// this function fetches the actual image data.
+pub async fn resolve_images(segments: &mut Vec<Segment>) -> Result<()> {
+    for segment in segments.iter_mut() {
+        if let Segment::Image(path_bytes) = segment {
+            let path = String::from_utf8_lossy(path_bytes).to_string();
+            match fetch_image_bytes(&path).await {
+                Ok(bytes) => *path_bytes = bytes,
+                Err(e) => {
+                    eprintln!("warning: could not load image `{path}`: {e:#}");
+                    *segment = Segment::Text(format!("[image: {path}]\n"));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn fetch_image_bytes(path: &str) -> Result<Vec<u8>> {
+    if path.starts_with("http://") || path.starts_with("https://") {
+        log::debug!("fetching remote image: {path}");
+        let bytes = reqwest::Client::new()
+            .get(path)
+            .send()
+            .await
+            .with_context(|| format!("requesting image from `{path}`"))?
+            .error_for_status()
+            .with_context(|| format!("image request to `{path}` failed"))?
+            .bytes()
+            .await
+            .context("reading image response body")?;
+        Ok(bytes.to_vec())
+    } else {
+        log::debug!("reading local image: {path}");
+        fs::read(path).with_context(|| format!("reading image file `{path}`"))
+    }
+}
+
 /// Open the network printer and send it a formatted weather receipt.
-pub fn print_report(endpoint: &str, address: &str, date: &str, report: &str) -> Result<()> {
+pub fn print_report(endpoint: &str, report: &str) -> Result<()> {
     let (host, port) = parse_endpoint(endpoint)?;
 
     let driver = NetworkDriver::open(host, port, Some(Duration::from_secs(5)))
         .with_context(|| format!("connecting to printer at `{endpoint}`"))?;
 
-    render(driver, address, date, report)
+    render(driver, report)
 }
 
 /// Build the weather receipt and send it to any ESC/POS driver.
-pub fn render<D: Driver>(driver: D, address: &str, date: &str, report: &str) -> Result<()> {
+pub fn render<D: Driver>(driver: D, report: &str) -> Result<()> {
     let mut printer = Printer::new(driver, Protocol::default(), Some(PrinterOptions::default()));
     printer.init()?;
 
     printer.line_spacing(PRINT_LINE_SPACING)?;
-
-    printer
-        .justify(JustifyMode::CENTER)?
-        .bold(true)?
-        .writeln(&sanitize_for_printer(address))?
-        .bold(false)?
-        .writeln(&sanitize_for_printer(date))?
-        .feed()?
-        .justify(JustifyMode::LEFT)?;
+    printer.justify(JustifyMode::LEFT)?;
 
     for line in report.lines() {
         printer.writeln(&sanitize_for_printer(line))?;
@@ -63,27 +95,17 @@ pub fn render<D: Driver>(driver: D, address: &str, date: &str, report: &str) -> 
 /// Open the network printer and print the weather report as an image.
 pub fn print_image(
     endpoint: &str,
-    address: &str,
-    date: &str,
-    report: &str,
+    segments: &[Segment],
     cfg: &ImageSettings,
+    dither: Dither,
+    lighten: u8,
 ) -> Result<()> {
     let (host, port) = parse_endpoint(endpoint)?;
 
     let driver = NetworkDriver::open(host, port, Some(Duration::from_secs(5)))
         .with_context(|| format!("connecting to printer at `{endpoint}`"))?;
 
-    render_image(driver, address, date, report, cfg)
-}
-
-fn render_image<D: Driver>(
-    driver: D,
-    address: &str,
-    date: &str,
-    report: &str,
-    cfg: &ImageSettings,
-) -> Result<()> {
-    let png = build_report_png(address, date, report, cfg)?;
+    let png = build_report_png(segments, cfg, dither, lighten)?;
     render_bit_image(driver, &png, cfg)
 }
 
@@ -335,12 +357,12 @@ fn is_icon(c: char) -> bool {
         || ('\u{100000}'..='\u{10FFFD}').contains(&c)
 }
 
-/// Render the weather report to a monochrome PNG suitable for the printer.
+/// Render the report segments to a monochrome PNG suitable for the printer.
 pub fn build_report_png(
-    address: &str,
-    date: &str,
-    report: &str,
+    segments: &[Segment],
     cfg: &ImageSettings,
+    dither: Dither,
+    lighten: u8,
 ) -> Result<Vec<u8>> {
     check_print_width(cfg)?;
 
@@ -350,58 +372,12 @@ pub fn build_report_png(
         .map_err(|e| anyhow!("`{}` is not a valid font: {e}", cfg.font.display()))?;
 
     let body_px = cfg.font_size;
-    let title_px = cfg.font_size * 1.6;
     let margin: i32 = 8;
-    let avail_width = (cfg.width as i32 - 2 * margin) as f32;
+    let width = cfg.width;
 
-    let fit_px = |text: &str, desired: f32| -> f32 {
-        if text.is_empty() {
-            return desired;
-        }
-        let (w, _) = text_size(PxScale::from(desired), &font, text);
-        if w == 0 || (w as f32) <= avail_width {
-            desired
-        } else {
-            desired * avail_width / w as f32
-        }
-    };
-
-    enum Align {
-        Left,
-        Center,
-    }
-    struct Row {
-        text: String,
-        px: f32,
-        align: Align,
-    }
-
-    let address_text = with_font_fallback(&font, address);
-    let date_text = with_font_fallback(&font, date);
-
-    let mut rows = vec![
-        Row {
-            px: fit_px(&address_text, title_px),
-            text: address_text,
-            align: Align::Center,
-        },
-        Row {
-            px: fit_px(&date_text, body_px),
-            text: date_text,
-            align: Align::Center,
-        },
-        Row {
-            text: String::new(),
-            px: body_px,
-            align: Align::Left,
-        },
-    ];
-    for line in report.lines() {
-        rows.push(Row {
-            text: with_font_fallback(&font, line),
-            px: body_px,
-            align: Align::Left,
-        });
+    enum Strip {
+        TextLine { text: String, px: f32 },
+        Image(GrayImage),
     }
 
     let line_height = |px: f32| -> i32 {
@@ -409,28 +385,49 @@ pub fn build_report_png(
         (s.ascent() - s.descent()).ceil() as i32 + 2
     };
 
-    let total_height = margin * 2 + rows.iter().map(|r| line_height(r.px)).sum::<i32>();
-    let width = cfg.width;
-    let height = total_height.max(1) as u32;
+    let mut strips: Vec<Strip> = Vec::new();
+    for segment in segments {
+        match segment {
+            Segment::Text(text) => {
+                for line in text.lines() {
+                    strips.push(Strip::TextLine {
+                        text: with_font_fallback(&font, line),
+                        px: body_px,
+                    });
+                }
+            }
+            Segment::Image(bytes) => match load_and_scale_image(bytes, width, dither, lighten) {
+                Ok(gray) => strips.push(Strip::Image(gray)),
+                Err(e) => {
+                    eprintln!("warning: could not render inline image: {e:#}");
+                }
+            },
+        }
+    }
 
+    let total_height: i32 = margin * 2
+        + strips
+            .iter()
+            .map(|s| match s {
+                Strip::TextLine { px, .. } => line_height(*px),
+                Strip::Image(img) => img.height() as i32,
+            })
+            .sum::<i32>();
+
+    let height = total_height.max(1) as u32;
     let mut img = GrayImage::from_pixel(width, height, Luma([255u8]));
     let black = Luma([0u8]);
 
     let mut y = margin;
-    for row in &rows {
-        let lh = line_height(row.px);
-        if !row.text.is_empty() {
-            let scale = PxScale::from(row.px);
-            match row.align {
-                Align::Center => {
-                    let (text_w, _) = text_size(scale, &font, &row.text);
-                    let x = ((width as i32 - text_w as i32) / 2).max(0);
-                    draw_text_mut(&mut img, black, x, y, scale, &font, &row.text);
-                }
-                Align::Left => {
-                    let first = row.text.chars().next().unwrap();
+    for strip in &strips {
+        match strip {
+            Strip::TextLine { text, px } => {
+                let lh = line_height(*px);
+                if !text.is_empty() {
+                    let scale = PxScale::from(*px);
+                    let first = text.chars().next().unwrap();
                     if is_icon(first) {
-                        let icon_scale = PxScale::from(row.px * ICON_SCALE);
+                        let icon_scale = PxScale::from(*px * ICON_SCALE);
                         let icon = first.to_string();
                         let baseline_shift =
                             font.as_scaled(scale).ascent() - font.as_scaled(icon_scale).ascent();
@@ -438,7 +435,7 @@ pub fn build_report_png(
                         draw_text_mut(&mut img, black, margin, y_icon, icon_scale, &font, &icon);
 
                         let (icon_w, _) = text_size(icon_scale, &font, &icon);
-                        let rest: String = row.text.chars().skip(1).collect();
+                        let rest: String = text.chars().skip(1).collect();
                         draw_text_mut(
                             &mut img,
                             black,
@@ -449,12 +446,16 @@ pub fn build_report_png(
                             &rest,
                         );
                     } else {
-                        draw_text_mut(&mut img, black, margin, y, scale, &font, &row.text);
+                        draw_text_mut(&mut img, black, margin, y, scale, &font, text);
                     }
                 }
+                y += lh;
+            }
+            Strip::Image(inline) => {
+                image::imageops::overlay(&mut img, inline, 0, y as i64);
+                y += inline.height() as i32;
             }
         }
-        y += lh;
     }
 
     let mut png = Vec::new();
@@ -463,6 +464,45 @@ pub fn build_report_png(
         .context("encoding the weather image to PNG")?;
 
     Ok(png)
+}
+
+/// Load image bytes, flatten to grayscale, scale to the print width, and
+/// reduce to black and white using the same dither/lighten rules as the
+/// image passthrough mode.
+fn load_and_scale_image(bytes: &[u8], width: u32, dither: Dither, lighten: u8) -> Result<GrayImage> {
+    let img = image::load_from_memory(bytes).context("decoding inline image")?;
+    let mut gray = flatten_onto_white(&img);
+    if gray.width() != width {
+        let scale_height =
+            (u64::from(gray.height()) * u64::from(width) / u64::from(gray.width())).max(1);
+        let scale_height = u32::try_from(scale_height).unwrap_or(u32::MAX);
+        gray = image::imageops::resize(
+            &gray,
+            width,
+            scale_height,
+            image::imageops::FilterType::Lanczos3,
+        );
+    }
+
+    let do_dither = match dither {
+        Dither::On => true,
+        Dither::Off => false,
+        Dither::Auto => has_midtones(&gray),
+    };
+
+    if lighten > 0 {
+        lighten_toward_white(&mut gray, lighten);
+    }
+
+    if do_dither {
+        image::imageops::dither(&mut gray, &image::imageops::BiLevel);
+    } else {
+        for px in gray.pixels_mut() {
+            px.0[0] = if px.0[0] <= 128 { 0 } else { 255 };
+        }
+    }
+
+    Ok(gray)
 }
 
 fn print_kitty_image(png: &[u8]) -> Result<()> {
@@ -575,18 +615,16 @@ mod tests {
     use super::*;
     use crate::settings::ImageSettings;
 
+    fn text_segments(text: &str) -> Vec<Segment> {
+        vec![Segment::Text(text.to_string())]
+    }
+
     #[test]
     fn builds_a_full_width_png() {
         let cfg = ImageSettings::default();
-        let report = "      \\   /     Sunny\n       .-.      26 \u{00b0}C\n    \u{2015} (   ) \u{2015}   \u{2199} 22 km/h\n";
+        let report = "11 Example Street, Townsville, AB1 2CD\nWednesday, 15 July 2026\n\n      \\   /     Sunny\n       .-.      26 \u{00b0}C\n    \u{2015} (   ) \u{2015}   \u{2199} 22 km/h\n";
 
-        let png = build_report_png(
-            "11 Example Street, Townsville, AB1 2CD",
-            "Wednesday, 15 July 2026",
-            report,
-            &cfg,
-        )
-        .expect("png should build");
+        let png = build_report_png(&text_segments(report), &cfg, Dither::Auto, 0).expect("png should build");
         assert!(!png.is_empty());
 
         let decoded = image::load_from_memory(&png).expect("png should decode");
@@ -599,13 +637,8 @@ mod tests {
     #[test]
     fn a_piped_receipt_survives_the_round_trip() {
         let cfg = ImageSettings::default();
-        let png = build_report_png(
-            "11 Example Street",
-            "Wednesday, 15 July 2026",
-            "Sunny\n",
-            &cfg,
-        )
-        .expect("png should build");
+        let segs = text_segments("11 Example Street\nWednesday, 15 July 2026\nSunny\n");
+        let png = build_report_png(&segs, &cfg, Dither::Auto, 0).expect("png should build");
         let original = image::load_from_memory(&png).unwrap().to_luma8();
 
         let prepared =
@@ -690,13 +723,8 @@ mod tests {
     #[test]
     fn warns_instead_of_silently_printing_a_blank_receipt() {
         let cfg = ImageSettings::default();
-        let png = build_report_png(
-            "11 Example Street",
-            "Wednesday, 15 July 2026",
-            "Sunny\n",
-            &cfg,
-        )
-        .expect("png should build");
+        let segs = text_segments("11 Example Street\nWednesday, 15 July 2026\nSunny\n");
+        let png = build_report_png(&segs, &cfg, Dither::Auto, 0).expect("png should build");
 
         let blanked = prepare_image_for_print(&png, &cfg, Dither::Off, 60).unwrap();
         let blanked = image::load_from_memory(&blanked).unwrap().to_luma8();

@@ -25,6 +25,15 @@ pub struct Cli {
     #[arg(short, long)]
     pub endpoint: Option<String>,
 
+    /// Template file that controls which sections appear and in what order.
+    #[arg(
+        short = 'T',
+        long,
+        value_name = "FILE",
+        default_value = "templates/default.tpl"
+    )]
+    pub template: PathBuf,
+
     /// Number of forecast days to request from wttr.in (0 = current only).
     #[arg(short, long, default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..=2))]
     pub days: u8,
