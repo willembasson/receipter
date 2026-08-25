@@ -469,7 +469,12 @@ pub fn build_report_png(
 /// Load image bytes, flatten to grayscale, scale to the print width, and
 /// reduce to black and white using the same dither/lighten rules as the
 /// image passthrough mode.
-fn load_and_scale_image(bytes: &[u8], width: u32, dither: Dither, lighten: u8) -> Result<GrayImage> {
+fn load_and_scale_image(
+    bytes: &[u8],
+    width: u32,
+    dither: Dither,
+    lighten: u8,
+) -> Result<GrayImage> {
     let img = image::load_from_memory(bytes).context("decoding inline image")?;
     let mut gray = flatten_onto_white(&img);
     if gray.width() != width {
@@ -624,7 +629,8 @@ mod tests {
         let cfg = ImageSettings::default();
         let report = "11 Example Street, Townsville, AB1 2CD\nWednesday, 15 July 2026\n\n      \\   /     Sunny\n       .-.      26 \u{00b0}C\n    \u{2015} (   ) \u{2015}   \u{2199} 22 km/h\n";
 
-        let png = build_report_png(&text_segments(report), &cfg, Dither::Auto, 0).expect("png should build");
+        let png = build_report_png(&text_segments(report), &cfg, Dither::Auto, 0)
+            .expect("png should build");
         assert!(!png.is_empty());
 
         let decoded = image::load_from_memory(&png).expect("png should decode");
