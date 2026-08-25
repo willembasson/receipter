@@ -24,8 +24,18 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     init_logging(cli.verbose);
 
-    let settings = load_settings(&cli.config)?;
+    let mut settings = load_settings(&cli.config)?;
     let tpl = template::load(&cli.template)?;
+
+    if let Some(w) = tpl.overrides.width {
+        settings.image.width = w;
+    }
+    if let Some(f) = tpl.overrides.font.clone() {
+        settings.image.font = f;
+    }
+    if let Some(s) = tpl.overrides.font_size {
+        settings.image.font_size = s;
+    }
 
     let location = cli
         .location
@@ -38,7 +48,11 @@ async fn main() -> Result<()> {
         .or_else(|| tpl.overrides.endpoint.clone())
         .unwrap_or_else(|| settings.endpoint.clone());
     let days = tpl.overrides.days.unwrap_or(cli.days);
-    let address = settings.address.clone();
+    let address = tpl
+        .overrides
+        .address
+        .clone()
+        .unwrap_or_else(|| settings.address.clone());
     log::debug!("loaded settings from `{}`", cli.config.display());
 
     if let Some(bytes) = render::read_input_image(cli.image.as_deref())? {

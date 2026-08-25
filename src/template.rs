@@ -30,7 +30,11 @@ pub enum Segment {
 pub struct TemplateOverrides {
     pub location: Option<String>,
     pub endpoint: Option<String>,
+    pub address: Option<String>,
     pub days: Option<u8>,
+    pub width: Option<u32>,
+    pub font: Option<std::path::PathBuf>,
+    pub font_size: Option<f32>,
 }
 
 const FALLBACK: &str = "{{date}}\n";
