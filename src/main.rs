@@ -32,7 +32,8 @@ async fn main() -> Result<()> {
 
     if let Some(bytes) = render::read_input_image(cli.image.as_deref())? {
         log::debug!("input: {} byte(s) of image data", bytes.len());
-        let png = render::prepare_image_for_print(&bytes, &settings.image, cli.dither, cli.lighten)?;
+        let png =
+            render::prepare_image_for_print(&bytes, &settings.image, cli.dither, cli.lighten)?;
         return render::output_image(
             cli.output.as_deref(),
             cli.stdout,
