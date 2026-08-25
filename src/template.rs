@@ -67,6 +67,12 @@ fn parse(input: &str) -> Result<Template> {
         toml::from_str(&frontmatter).context("parsing template overrides")?
     };
 
+    if let Some(days) = overrides.days
+        && days > 2
+    {
+        bail!("template override `days = {days}` is out of range (must be 0, 1, or 2)");
+    }
+
     let elements = parse_body(body);
 
     Ok(Template {
@@ -229,6 +235,11 @@ fn collapse(parts: Vec<RenderedElement>) -> Vec<Segment> {
                     push_text(&mut segments, text);
                 }
                 RenderedElement::Image(path) => {
+                    if let Some(Segment::Text(t)) = segments.last_mut()
+                        && !t.ends_with('\n')
+                    {
+                        t.push('\n');
+                    }
                     segments.push(Segment::Image(path.clone().into_bytes()));
                 }
                 RenderedElement::Empty => {}
@@ -279,6 +290,16 @@ days = 1
         assert!(matches!(tpl.elements[0], Element::Text(ref s) if s.is_empty()));
         assert!(matches!(tpl.elements[1], Element::Block(ref s) if s == "address"));
         assert!(matches!(tpl.elements[2], Element::Block(ref s) if s == "date"));
+    }
+
+    #[test]
+    fn rejects_days_out_of_range() {
+        let input = "+++\ndays = 3\n+++\n{{weather}}\n";
+        let err = parse(input).unwrap_err();
+        assert!(
+            err.to_string().contains("days = 3"),
+            "expected a clear range error, got: {err}"
+        );
     }
 
     #[test]

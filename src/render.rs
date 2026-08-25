@@ -29,7 +29,7 @@ const MIDTONE_RATIO: f64 = 0.20;
 /// Resolve image paths/URLs in segments to their actual bytes.
 /// Segments that are `Image` at this point contain the path as bytes (from the template parser);
 /// this function fetches the actual image data.
-pub async fn resolve_images(segments: &mut Vec<Segment>) -> Result<()> {
+pub async fn resolve_images(segments: &mut [Segment]) -> Result<()> {
     for segment in segments.iter_mut() {
         if let Segment::Image(path_bytes) = segment {
             let path = String::from_utf8_lossy(path_bytes).to_string();
@@ -747,6 +747,34 @@ mod tests {
             prepare_image_for_print(b"not an image", &ImageSettings::default(), Dither::Auto, 0)
                 .expect_err("garbage should not decode");
         assert!(err.to_string().contains("decoding the image"));
+    }
+
+    #[test]
+    fn inline_image_segment_is_decoded_and_scaled() {
+        let cfg = ImageSettings::default();
+
+        let src = image::RgbaImage::from_pixel(32, 16, image::Rgba([0, 0, 0, 255]));
+        let mut png_bytes = Vec::new();
+        DynamicImage::ImageRgba8(src)
+            .write_to(&mut Cursor::new(&mut png_bytes), image::ImageFormat::Png)
+            .unwrap();
+
+        let segments = vec![
+            Segment::Text("Header\n".to_string()),
+            Segment::Image(png_bytes),
+            Segment::Text("Footer\n".to_string()),
+        ];
+
+        let png = build_report_png(&segments, &cfg, Dither::Auto, 0).expect("png should build");
+        let decoded = image::load_from_memory(&png).unwrap().to_luma8();
+
+        assert_eq!(decoded.width(), cfg.width);
+        // The inline image is scaled to cfg.width (576) from 32px wide, so its
+        // height becomes 16 * 576/32 = 288. The total image must be taller than
+        // just the text lines.
+        assert!(decoded.height() > 288);
+        // The scaled black image contributes black pixels.
+        assert!(decoded.pixels().any(|p| p.0[0] == 0));
     }
 
     #[test]

@@ -35,8 +35,8 @@ pub struct Cli {
     pub template: PathBuf,
 
     /// Number of forecast days to request from wttr.in (0 = current only).
-    #[arg(short, long, default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..=2))]
-    pub days: u8,
+    #[arg(short, long, value_parser = clap::value_parser!(u8).range(0..=2))]
+    pub days: Option<u8>,
 
     /// Date to print as YYYYMMDD (default: today). Weather is available for
     /// today and the next couple of forecast days.

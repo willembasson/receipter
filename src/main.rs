@@ -47,7 +47,7 @@ async fn main() -> Result<()> {
         .clone()
         .or_else(|| tpl.overrides.endpoint.clone())
         .unwrap_or_else(|| settings.endpoint.clone());
-    let days = tpl.overrides.days.unwrap_or(cli.days);
+    let days = cli.days.or(tpl.overrides.days).unwrap_or(0);
     let address = tpl
         .overrides
         .address
@@ -238,7 +238,11 @@ async fn main() -> Result<()> {
         }
     });
 
-    render::resolve_images(&mut segments).await?;
+    let needs_images =
+        cli.output.is_some() || cli.image_text || (!cli.stdout && !cli.raw && !cli.text);
+    if needs_images {
+        render::resolve_images(&mut segments).await?;
+    }
 
     output_report(&cli, &endpoint, &segments, &settings.image)?;
 
