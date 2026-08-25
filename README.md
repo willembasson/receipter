@@ -195,6 +195,85 @@ below).
   ```
 - **`--raw`** — dumps the ESC/POS command bytes (e.g. pipe to `xxd`).
 
+## Templating
+
+A template file controls which sections appear on the receipt and in what order.
+The default is `templates/default.tpl`; override with `-T/--template <FILE>`.
+
+### Syntax
+
+A template is plain text with three special constructs:
+
+- **`{{block}}`** — a named content block (e.g. `{{weather}}`, `{{date}}`).
+- **`---`** — a section separator. Rendered as a line of dashes in the output.
+  Separators adjacent to empty blocks are suppressed automatically.
+- **`{{image "path_or_url"}}`** — an inline image, loaded from a local file or
+  HTTP URL and scaled to the print width.
+
+Any other line is literal text, passed through as-is.
+
+Available blocks: `address`, `date`, `weather`, `calendars`, `transport`, `bins`.
+
+### Frontmatter
+
+A template can optionally begin with a TOML frontmatter block delimited by `+++`
+lines. Values set here override the corresponding settings from `settings.toml`
+(but CLI flags still take highest precedence):
+
+```
++++
+location = "London"
+days = 1
+font_size = 24.0
++++
+
+{{date}}
+
+{{weather}}
+```
+
+Supported frontmatter keys: `location`, `endpoint`, `address`, `days` (0–2),
+`width`, `font`, `font_size`.
+
+### Fallback
+
+If the template file does not exist, a built-in fallback of `{{date}}` is used
+so the receipt always renders something.
+
+### Example
+
+```
++++
+location = "London"
++++
+
+{{address}}
+{{date}}
+
+{{weather}}
+
+---
+
+{{calendars}}
+
+---
+
+{{image "logo.png"}}
+
+---
+
+{{transport}}
+
+---
+
+{{bins}}
+```
+
+Blocks that resolve to empty content (e.g. `{{transport}}` when no
+`[transport]` config exists) are omitted along with their surrounding
+separators, so the receipt stays clean without needing multiple template
+variants.
+
 ## Printing an image
 
 Any image can be printed instead of the report, either as an argument or piped
