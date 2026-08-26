@@ -39,6 +39,10 @@ pub struct TemplateOverrides {
 
 const FALLBACK: &str = "{{date}}\n";
 
+pub fn from_str(input: &str) -> Result<Template> {
+    parse(input)
+}
+
 pub fn load(path: &Path) -> Result<Template> {
     let raw = match fs::read_to_string(path) {
         Ok(content) => content,

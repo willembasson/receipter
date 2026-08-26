@@ -274,6 +274,21 @@ Blocks that resolve to empty content (e.g. `{{transport}}` when no
 separators, so the receipt stays clean without needing multiple template
 variants.
 
+### Piping a template on stdin
+
+Instead of writing a file, you can pipe a template directly:
+
+```sh
+echo "{{weather}}" | receipter --stdout
+echo "{{date}}\n---\n{{weather}}" | receipter --stdout --imageText
+printf '{{address}}\n{{date}}' | receipter --output preview.png
+```
+
+When stdin is piped and the data is not a recognised image format, it is parsed
+as a template (with full frontmatter support). This overrides the `-T` template
+file for that run. Image data on stdin still goes through the image printing
+path as before.
+
 ## Printing an image
 
 Any image can be printed instead of the report, either as an argument or piped

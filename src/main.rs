@@ -25,7 +25,23 @@ async fn main() -> Result<()> {
     init_logging(cli.verbose);
 
     let mut settings = load_settings(&cli.config)?;
-    let tpl = template::load(&cli.template)?;
+
+    // Read stdin early (before it's consumed) when no explicit image arg is given.
+    let stdin_bytes = if cli.image.is_some() {
+        None
+    } else {
+        render::read_stdin_bytes()?
+    };
+
+    // Determine the template: piped text on stdin overrides the file.
+    let tpl = match &stdin_bytes {
+        Some(bytes) if !render::looks_like_image(bytes) => {
+            let text = String::from_utf8_lossy(bytes);
+            log::debug!("using piped stdin as template ({} bytes)", bytes.len());
+            template::from_str(&text)?
+        }
+        _ => template::load(&cli.template)?,
+    };
 
     if let Some(w) = tpl.overrides.width {
         settings.image.width = w;
@@ -55,7 +71,14 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|| settings.address.clone());
     log::debug!("loaded settings from `{}`", cli.config.display());
 
-    if let Some(bytes) = render::read_input_image(cli.image.as_deref())? {
+    // Explicit image argument, or piped image data on stdin.
+    let image_bytes = if cli.image.is_some() {
+        render::read_input_image(cli.image.as_deref())?
+    } else {
+        stdin_bytes.filter(|b| render::looks_like_image(b))
+    };
+
+    if let Some(bytes) = image_bytes {
         log::debug!("input: {} byte(s) of image data", bytes.len());
         let png =
             render::prepare_image_for_print(&bytes, &settings.image, cli.dither, cli.lighten)?;

@@ -125,6 +125,25 @@ pub fn render_bit_image<D: Driver>(driver: D, png: &[u8], cfg: &ImageSettings) -
     Ok(())
 }
 
+/// Read piped stdin bytes, if any. Returns `None` when stdin is a terminal or
+/// empty.
+pub fn read_stdin_bytes() -> Result<Option<Vec<u8>>> {
+    if std::io::stdin().is_terminal() {
+        return Ok(None);
+    }
+    let bytes = read_stdin()?;
+    Ok((!bytes.is_empty()).then_some(bytes))
+}
+
+/// Whether bytes look like a known image format (by magic number).
+pub fn looks_like_image(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"\x89PNG")
+        || bytes.starts_with(&[0xFF, 0xD8, 0xFF])
+        || bytes.starts_with(b"GIF8")
+        || bytes.starts_with(b"BM")
+        || bytes.starts_with(b"RIFF")
+}
+
 /// The image to print instead of the report, if there is one.
 pub fn read_input_image(path: Option<&Path>) -> Result<Option<Vec<u8>>> {
     if let Some(path) = path {
